@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+docs/build/
+docs/source/api/generated/
+docs/source/jupyter_execute/
+docs/source/.jupyter_cache/

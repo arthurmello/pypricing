@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pypricing"
+version = "0.0.1"
+description = "Bayesian price analytics with PyMC"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [
+    { name = "Arthur Mello", email = "arthur.bmello@gmail.com" },
+]
+maintainers = [
+    { name = "Arthur Mello", email = "arthur.bmello@gmail.com" },
+]
+keywords = [
+    "bayesian",
+    "demand",
+    "elasticity",
+    "pricing",
+    "pymc",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "arviz>=0.17",
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pymc>=5.0",
+    "pymc-marketing>=0.19.0",
+    "scipy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/arthurmello/pypricing"
+Documentation = "https://pypricing.readthedocs.io"
+Repository = "https://github.com/arthurmello/pypricing"
+Issues = "https://github.com/arthurmello/pypricing/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.15.7",
+]
+docs = [
+    "sphinx>=7.0",
+    "myst-nb>=1.0",
+    "furo>=2024.1.29",
+    "sphinx-copybutton>=0.5",
+]
+graphviz = [
+    "graphviz>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pypricing = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "unit: fast tests without heavy MCMC",
+    "integration: short MCMC smoke / end-to-end checks",
+    "recovery: statistical parameter recovery (slower)",
+]
+# Default gate: unit + integration. Run recovery explicitly with: pytest -m recovery
+addopts = "-m 'not recovery'"
+
+[tool.ruff]
+target-version = "py311"
+src = ["src", "tests"]
+line-length = 88
+
+[tool.ruff.lint]
+# Baseline gate; expand once the tree is cleaned up.
+select = ["E4", "E7", "E9", "F"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.15.7",
+]
