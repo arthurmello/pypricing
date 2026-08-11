@@ -1,0 +1,40 @@
+name: release-pipeline
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  build-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: pip install build
+      - name: Build
+        run: python -m build
+      - name: Store the distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Packages
+          path: dist/
+
+  publish-package:
+    if: github.repository_owner == 'arthurmello' && github.event_name == 'release' && github.event.action == 'published'
+    environment: release
+    needs: build-package
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Distribution Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Packages
+          path: dist
+      - name: Publish Package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
