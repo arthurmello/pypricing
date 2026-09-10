@@ -11,6 +11,7 @@ from pypricing.models.basic import DemandModel
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
+from pypricing.model_components.time_terms import get_trend_term
 
 
 class LogLogDemandModel(DemandModel):
@@ -18,7 +19,7 @@ class LogLogDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku + elasticity_sku * log(P) + controls + cross``
+    ``mu = alpha_sku + elasticity_sku * log(P) + controls + cross + trend``
 
     ``elasticity_sku`` is own-price elasticity (e.g. ``-1.5`` ≈ 1% price up → 1.5%
     quantity down in expectation). Best as a simple constant-elasticity baseline.
@@ -53,12 +54,16 @@ class LogLogDemandModel(DemandModel):
             sigma = get_sigma(self.model_config)
 
             controls_term = get_controls_term(self.model_config, data)
+            trend_term = get_trend_term(
+                self.model_config, data, trend=self.trend, t0=self.t0_
+            )
 
             mu = (
                 alpha_sku[obs_sku]
                 + elasticity_sku[obs_sku] * log_p
                 + controls_term
                 + self._cross_term(data)
+                + trend_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model
@@ -71,6 +76,7 @@ class LogLogDemandModel(DemandModel):
         obs_sku_idx: np.ndarray,
         X_control: np.ndarray | None,
         X_cross: np.ndarray | None = None,
+        t_years: np.ndarray | None = None,
     ) -> np.ndarray:
         alpha = posterior["alpha_sku"].values
         elasticity = posterior["elasticity_sku"].values
@@ -83,4 +89,6 @@ class LogLogDemandModel(DemandModel):
             posterior=posterior,
             X_control=X_control,
             X_cross=X_cross,
+            t_years=t_years,
+            obs_sku_idx=obs_sku_idx,
         )

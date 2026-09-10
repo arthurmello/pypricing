@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pypricing.data import PanelColumns, PricePanelData, parse_period_index
+from pypricing.data import PanelColumns, PricePanelData, parse_period_index, period_to_t_years
 
 
 def test_from_frame_basic():
@@ -205,3 +205,11 @@ def test_from_frame_parse_period_requires_column():
     df = pd.DataFrame({"sku": ["a"], "price": [1.0], "quantity": [1.0]})
     with pytest.raises(ValueError, match="Missing period column"):
         PricePanelData.from_frame(df, parse_period=True)
+
+
+def test_period_to_t_years():
+    t0 = pd.Timestamp("2020-01-01")
+    idx = pd.DatetimeIndex([t0, t0 + pd.Timedelta(days=365.25)])
+    t = period_to_t_years(idx, t0)
+    assert t[0] == pytest.approx(0.0)
+    assert t[1] == pytest.approx(1.0)

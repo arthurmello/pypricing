@@ -10,6 +10,7 @@ from pypricing.models.basic import DemandModel
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
+from pypricing.model_components.time_terms import get_trend_term
 
 
 class QuadraticLogDemandModel(DemandModel):
@@ -66,6 +67,9 @@ class QuadraticLogDemandModel(DemandModel):
             sigma = get_sigma(self.model_config)
 
             controls_term = get_controls_term(self.model_config, data)
+            trend_term = get_trend_term(
+                self.model_config, data, trend=self.trend, t0=self.t0_
+            )
 
             beta1_sku = elasticity_sku - 2.0 * curvature_sku * log_p_mid_sku
 
@@ -75,6 +79,7 @@ class QuadraticLogDemandModel(DemandModel):
                 + curvature_sku[obs_sku] * (log_p**2)
                 + controls_term
                 + self._cross_term(data)
+                + trend_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model
@@ -87,6 +92,7 @@ class QuadraticLogDemandModel(DemandModel):
         obs_sku_idx: np.ndarray,
         X_control: np.ndarray | None,
         X_cross: np.ndarray | None = None,
+        t_years: np.ndarray | None = None,
     ) -> np.ndarray:
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
@@ -112,4 +118,6 @@ class QuadraticLogDemandModel(DemandModel):
             posterior=posterior,
             X_control=X_control,
             X_cross=X_cross,
+            t_years=t_years,
+            obs_sku_idx=obs_sku_idx,
         )

@@ -72,6 +72,18 @@ def parse_period_index(
     return _as_naive_datetime_index(pd.DatetimeIndex(parsed))
 
 
+def period_to_t_years(
+    period_index: pd.DatetimeIndex,
+    t0: pd.Timestamp,
+) -> np.ndarray:
+    """Years since ``t0`` for each timestamp (365.25-day year)."""
+    t0 = pd.Timestamp(t0)
+    if t0.tz is not None:
+        t0 = t0.tz_convert("UTC").tz_localize(None)
+    delta_days = (period_index - t0) / pd.Timedelta(days=1)
+    return np.asarray(delta_days, dtype=np.float64) / 365.25
+
+
 @dataclass(frozen=True)
 class PanelColumns:
     """Column mapping and panel-build knobs for long-format price data."""

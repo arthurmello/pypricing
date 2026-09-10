@@ -21,7 +21,12 @@ from pypricing.model_components.cross_elasticity import (
     validate_cross_elasticity_config,
 )
 from pypricing.data import CrossPairIndex, PanelColumns, PricePanelData
-from pypricing.data.price_panel import floor_censored_fraction
+from pypricing.data.price_panel import (
+    floor_censored_fraction,
+    parse_period_index,
+    period_to_t_years,
+)
+from pypricing.model_components.time_terms import TrendKind
 
 try:
     _PKG_VERSION = pkg_version("pypricing")
@@ -34,7 +39,8 @@ class DemandModel(ModelBuilder):
 
     Subclasses define the own-price mean curve; this base handles fit/predict,
     optional controls, hierarchical SKU effects via ``PanelColumns.group_columns``,
-    optional cross-price terms, plotting helpers, and per-SKU revenue optimization.
+    optional linear time trend, optional cross-price terms, plotting helpers, and
+    per-SKU revenue optimization.
 
     Parameters
     ----------
@@ -44,6 +50,11 @@ class DemandModel(ModelBuilder):
     cross_elasticity
         If set, add directed cross-price effects (``CrossElasticitySpec``). Requires
         a balanced market cell per ``period`` (and ``region`` when used).
+    trend
+        Linear time trend in log-quantity, in years since the earliest training
+        date. ``None`` (default) omits the term. ``"shared"`` is one slope;
+        ``"sku"`` is a per-SKU slope pooled toward a shared mean (and through
+        ``group_columns`` when set). Requires a datetime ``period`` column.
     model_config
         Prior overrides keyed by parameter name, each
         ``{"dist": <PyMC dist>, "kwargs": {...}}``.
@@ -66,17 +77,20 @@ class DemandModel(ModelBuilder):
         *,
         panel_columns: PanelColumns | None = None,
         cross_elasticity: CrossElasticitySpec | None = None,
+        trend: TrendKind | None = None,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model_config=model_config, sampler_config=sampler_config)
         self.panel_columns = panel_columns or PanelColumns()
         self.cross_elasticity = cross_elasticity
+        self.trend = trend
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.log_price_midpoint_sku_: np.ndarray | None = None
         self.data: pd.DataFrame | None = None
         self.cross_pairs_: CrossPairIndex | None = None
+        self.t0_: pd.Timestamp | None = None
         self._validate_configuration()
 
     @property
@@ -128,10 +142,15 @@ class DemandModel(ModelBuilder):
         obs_sku_idx: np.ndarray,
         X_control: np.ndarray | None,
         X_cross: np.ndarray | None = None,
+        t_years: np.ndarray | None = None,
     ) -> np.ndarray:
         pass
 
     def _validate_configuration(self) -> None:
+        if self.trend not in (None, "sku", "shared"):
+            raise ValueError(
+                f"trend must be None, 'sku', or 'shared'; got {self.trend!r}"
+            )
         validate_cross_elasticity_config(
             cross_elasticity=self.cross_elasticity,
             group_columns=self.panel_columns.group_columns,
@@ -173,6 +192,7 @@ class DemandModel(ModelBuilder):
                     if ce is None
                     else {"mode": ce.mode, "group_level": ce.group_level}
                 ),
+                "trend": json.dumps(self.trend),
             }
         )
         return attrs
@@ -207,10 +227,12 @@ class DemandModel(ModelBuilder):
             ),
         )
 
+        trend = json.loads(attrs["trend"]) if "trend" in attrs else None
         kwargs.update(
             {
                 "panel_columns": panel_columns,
                 "cross_elasticity": cross_elasticity,
+                "trend": trend,
             }
         )
         return kwargs
@@ -251,7 +273,17 @@ class DemandModel(ModelBuilder):
                     f"cross_elasticity requires column region_col={cols.region_col!r}"
                 )
 
-        panel = PricePanelData.from_frame(data, panel_columns=cols)
+        panel = PricePanelData.from_frame(
+            data,
+            panel_columns=cols,
+            parse_period=self.trend is not None,
+        )
+        if self.trend is not None:
+            if panel.period_index is None:
+                raise RuntimeError("internal: period_index missing with trend enabled")
+            self.t0_ = pd.Timestamp(panel.period_index.min())
+        else:
+            self.t0_ = None
 
         threshold = cols.floor_censoring_warn_threshold
         if threshold is not None:
@@ -333,6 +365,8 @@ class DemandModel(ModelBuilder):
                 "curvature_sku",
                 "sigma",
                 "beta_control",
+                "mu_trend",
+                "trend_sku",
             ]
             candidates.append("gamma_pair")
             var_names = [v for v in candidates if v in self.idata.posterior]
@@ -419,6 +453,7 @@ class DemandModel(ModelBuilder):
         sku: Any,
         price_grid: Iterable[float],
         controls: dict[str, float] | None = None,
+        at_period: pd.Timestamp | str | None = None,
         hdi_prob: float = 0.9,
         ax=None,
     ):
@@ -429,6 +464,7 @@ class DemandModel(ModelBuilder):
             sku=sku,
             price_grid=price_grid,
             controls=controls,
+            at_period=at_period,
             hdi_prob=hdi_prob,
             ax=ax,
         )
@@ -439,6 +475,7 @@ class DemandModel(ModelBuilder):
         sku: Any,
         price_grid: Iterable[float],
         controls: dict[str, float] | None = None,
+        at_period: pd.Timestamp | str | None = None,
         hdi_prob: float = 0.9,
         fd_step: float | None = None,
         ax=None,
@@ -450,6 +487,7 @@ class DemandModel(ModelBuilder):
             sku=sku,
             price_grid=price_grid,
             controls=controls,
+            at_period=at_period,
             hdi_prob=hdi_prob,
             fd_step=fd_step,
             ax=ax,
@@ -461,6 +499,7 @@ class DemandModel(ModelBuilder):
         sku: Any,
         price_grid: Iterable[float],
         controls: dict[str, float] | None = None,
+        at_period: pd.Timestamp | str | None = None,
         hdi_prob: float = 0.9,
         random_seed: int | None = None,
         ax=None,
@@ -472,6 +511,7 @@ class DemandModel(ModelBuilder):
             sku=sku,
             price_grid=price_grid,
             controls=controls,
+            at_period=at_period,
             hdi_prob=hdi_prob,
             random_seed=random_seed,
             ax=ax,
@@ -558,6 +598,48 @@ class DemandModel(ModelBuilder):
             return log_price, obs_sku_idx, X
         return log_price, obs_sku_idx, None
 
+    def default_counterfactual_period(self) -> pd.Timestamp:
+        """Last training timestamp; used when holding trend fixed along a price grid."""
+        if self.trend is None or self.t0_ is None:
+            raise RuntimeError("default_counterfactual_period requires a fitted trend")
+        if self.data is not None and self.period_col in self.data.columns:
+            idx = parse_period_index(
+                self.data[self.period_col], period_col=self.period_col
+            )
+            return pd.Timestamp(idx.max())
+        return self.t0_
+
+    def _t_years_for_frame(self, df: pd.DataFrame) -> np.ndarray | None:
+        if self.trend is None:
+            return None
+        if self.t0_ is None:
+            raise RuntimeError("Model is missing t0_; fit the model first.")
+        period_col = self.period_col
+        if period_col not in df.columns:
+            raise ValueError(
+                f"Model was fit with trend; prediction data needs datetime "
+                f"column {period_col!r}."
+            )
+        idx = parse_period_index(df[period_col], period_col=period_col)
+        return period_to_t_years(idx, self.t0_)
+
+    def _t_years_for_counterfactual(
+        self,
+        n: int,
+        at_period: pd.Timestamp | str | None = None,
+    ) -> np.ndarray | None:
+        if self.trend is None:
+            return None
+        if self.t0_ is None:
+            raise RuntimeError("Model is missing t0_; fit the model first.")
+        ts = (
+            pd.Timestamp(at_period)
+            if at_period is not None
+            else self.default_counterfactual_period()
+        )
+        t = period_to_t_years(pd.DatetimeIndex([ts]), self.t0_)[0]
+        return np.full(n, t, dtype=np.float64)
+
     def _cross_matrix_for_frame(
         self, df: pd.DataFrame, obs_sku_idx: np.ndarray
     ) -> np.ndarray | None:
@@ -584,6 +666,7 @@ class DemandModel(ModelBuilder):
 
         log_price, obs_sku_idx, X_control = self._build_prediction_features(df)
         X_cross = self._cross_matrix_for_frame(df, obs_sku_idx)
+        t_years = self._t_years_for_frame(df)
         post = self.idata.posterior
         sigma = post["sigma"].values
         mu = self.compute_mu_from_posterior(
@@ -592,6 +675,7 @@ class DemandModel(ModelBuilder):
             obs_sku_idx=obs_sku_idx,
             X_control=X_control,
             X_cross=X_cross,
+            t_years=t_years,
         )
 
         rng = np.random.default_rng(random_seed)

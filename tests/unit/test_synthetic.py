@@ -38,7 +38,7 @@ def test_no_optional_dims():
     assert "category" not in df.columns
     assert "region" not in df.columns
     assert "control_1" not in df.columns
-    assert "date" not in df.columns
+    assert not pd.api.types.is_datetime64_any_dtype(df["period"])
 
 
 def test_date_column_from_start():
@@ -50,9 +50,9 @@ def test_date_column_from_start():
         freq="W",
     )
     assert len(df) == 10 * 4
-    assert "date" in df.columns
-    assert pd.api.types.is_datetime64_any_dtype(df["date"])
-    assert df["date"].nunique() == 10
+    assert "date" not in df.columns
+    assert pd.api.types.is_datetime64_any_dtype(df["period"])
+    assert df["period"].nunique() == 10
 
 
 def test_n_periods_positive():
@@ -167,4 +167,27 @@ def test_include_seasonality_flag():
     )
     assert not np.allclose(
         df_on["log_quantity"].to_numpy(), df_off["log_quantity"].to_numpy()
+    )
+
+
+def test_volume_trend_requires_start_date():
+    with pytest.raises(ValueError, match="start_date"):
+        generate_mock_data(n_periods=4, n_skus=2, random_state=0, volume_trend=0.1)
+
+
+def test_volume_trend_changes_quantity():
+    kwargs = dict(
+        n_periods=20,
+        n_skus=2,
+        random_state=0,
+        start_date="2020-01-06",
+        include_seasonality=False,
+        round_quantity=False,
+    )
+    df0, truth0 = generate_mock_data(**kwargs, volume_trend=0.0, return_truth=True)
+    df1, truth1 = generate_mock_data(**kwargs, volume_trend=0.2, return_truth=True)
+    assert truth0.volume_trend == 0.0
+    assert truth1.volume_trend == 0.2
+    assert not np.allclose(
+        df0["log_quantity"].to_numpy(), df1["log_quantity"].to_numpy()
     )

@@ -43,6 +43,7 @@ class MockDataTruth:
     noise_sigma: float
     control_coefs: np.ndarray | None
     gamma_pair: dict[tuple[int, int], float] | None
+    volume_trend: float
 
 
 @dataclass
@@ -78,6 +79,7 @@ class _PanelSim:
     annual_phase: np.ndarray
     include_seasonality: bool
     round_quantity: bool
+    volume_trend: float
 
 
 def _as_rng(random_state: RandomState) -> np.random.Generator:
@@ -398,11 +400,21 @@ def _simulate_panel_rows(
                 controls = None
                 ctrl_term = 0.0
 
+            if sim.date_index is not None and sim.volume_trend:
+                t_years = np.asarray(
+                    (sim.date_index - sim.date_index[0]) / pd.Timedelta(days=365.25),
+                    dtype=np.float64,
+                )
+                trend_term = sim.volume_trend * t_years
+            else:
+                trend_term = 0.0
+
             common = (
                 sim.effects.intercept[s]
                 + shift_r
                 + season_term
                 + ctrl_term
+                + trend_term
                 + rng.normal(0, sigma, size=sim.n_periods)
             )
             mean_log_q = _mean_log_quantity(
@@ -447,14 +459,12 @@ def _simulate_panel_rows(
                 q_t = float(quantity[t])
                 row: dict = {
                     "sku": f"sku_{s + 1}",
-                    "period": t,
+                    "period": sim.date_index[t] if sim.date_index is not None else t,
                     "price": float(price_out[t]),
                     "quantity": int(q_t) if sim.round_quantity else q_t,
                     "log_price": float(log_p_out[t]),
                     "log_quantity": float(log_q_out[t]),
                 }
-                if sim.date_index is not None:
-                    row["date"] = sim.date_index[t]
                 if hierarchy is not None:
                     for L in range(hierarchy.n_levels):
                         row[f"category_{L + 1}"] = (
@@ -490,6 +500,7 @@ def generate_mock_data(
     include_seasonality: bool = True,
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
+    volume_trend: float = 0.0,
     return_truth: Literal[False] = False,
 ) -> pd.DataFrame: ...
 
@@ -512,6 +523,7 @@ def generate_mock_data(
     include_seasonality: bool = True,
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
+    volume_trend: float = 0.0,
     return_truth: Literal[True],
 ) -> tuple[pd.DataFrame, MockDataTruth]: ...
 
@@ -533,6 +545,7 @@ def generate_mock_data(
     include_seasonality: bool = True,
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
+    volume_trend: float = 0.0,
     return_truth: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, MockDataTruth]:
     """
@@ -558,7 +571,8 @@ def generate_mock_data(
     Parameters
     ----------
     n_periods
-        Time dimension length. Integer ``period`` runs ``0 … n_periods - 1``.
+        Time dimension length. ``period`` is ``0 … n_periods - 1`` unless
+        ``start_date`` is set, in which case it is a datetime index.
     n_skus
         Number of SKUs.
     n_categories
@@ -578,9 +592,8 @@ def generate_mock_data(
     random_state
         Seed or ``numpy.random.Generator``.
     start_date
-        If ``None``, no ``date`` column; seasonality is a single cycle over
-        ``period``. If set, builds a calendar index with ``freq`` and ``n_periods``,
-        adds a ``date`` column, and uses annual (day-of-year) seasonality.
+        If ``None``, integer ``period`` (``0 … n_periods - 1``). If set, ``period``
+        is a calendar index with ``freq``, and seasonality uses day-of-year.
     freq
         Pandas offset alias when ``start_date`` is set (default ``\"W\"``).
     shape
@@ -600,6 +613,9 @@ def generate_mock_data(
     price_shock_sigma
         Std of per-period log-price innovations in the random walk (default ``0.03``).
         Larger values improve elasticity identification.
+    volume_trend
+        Shared annual log-quantity growth (e.g. ``0.1`` ≈ +10%/year). Requires
+        ``start_date``. Stored on :class:`MockDataTruth` when ``return_truth=True``.
     return_truth
         If ``True``, also return a :class:`MockDataTruth` with per-SKU DGP
         parameters (and optional cross / control draws).
@@ -609,8 +625,7 @@ def generate_mock_data(
     pandas.DataFrame or tuple
         Columns: ``sku``, ``period``, ``price``, ``quantity``, ``log_price``,
         ``log_quantity``, optional ``category`` or ``category_1`` …, ``region``,
-        ``control_*``, optional ``date``. With ``return_truth=True``,
-        ``(frame, truth)``.
+        ``control_*``. With ``return_truth=True``, ``(frame, truth)``.
     """
     ce = _validate_kwargs(
         n_periods,
@@ -627,6 +642,8 @@ def generate_mock_data(
 
     if price_shock_sigma <= 0:
         raise ValueError("price_shock_sigma must be positive")
+    if volume_trend != 0.0 and start_date is None:
+        raise ValueError("volume_trend requires start_date")
 
     rng = _as_rng(random_state)
 
@@ -706,6 +723,7 @@ def generate_mock_data(
             annual_phase=annual_phase,
             include_seasonality=include_seasonality,
             round_quantity=round_quantity,
+            volume_trend=float(volume_trend),
         ),
     )
     df = pd.DataFrame(rows)
@@ -730,5 +748,6 @@ def generate_mock_data(
             else np.asarray(control_coefs, dtype=np.float64).copy()
         ),
         gamma_pair=None if gamma_map is None else dict(gamma_map),
+        volume_trend=float(volume_trend),
     )
     return df, truth

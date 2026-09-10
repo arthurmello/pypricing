@@ -89,6 +89,7 @@ def _sku_price_grid_predictions(
     *,
     hdi_prob: float,
     random_seed: int | None = None,
+    at_period: Any = None,
 ) -> tuple[pd.DataFrame, Any]:
     """Predict quantity along ``price_grid`` for one SKU; return ``(pred_df, sku_value)``."""
     price_grid_arr, _, _, _, sku_value = _sku_price_grid_design(
@@ -105,6 +106,13 @@ def _sku_price_grid_predictions(
         assert controls is not None
         for c in model.control_names_:
             df_pred[c] = float(controls[c])
+    if model.trend is not None:
+        ts = (
+            pd.Timestamp(at_period)
+            if at_period is not None
+            else model.default_counterfactual_period()
+        )
+        df_pred[model.period_col] = ts
 
     pred = model.predict(df_pred, hdi_prob=hdi_prob, random_seed=random_seed)
     return pred, sku_value
@@ -117,6 +125,7 @@ def _posterior_local_elasticity(
     obs_sku_idx: np.ndarray,
     X_control: np.ndarray | None,
     fd_step: float | None = None,
+    t_years: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Posterior draws of local own-price elasticity ``d mu / d log p`` on the mean
@@ -144,6 +153,7 @@ def _posterior_local_elasticity(
         obs_sku_idx=obs_sku_idx,
         X_control=X_control,
         X_cross=None,
+        t_years=t_years,
     )
     mu_m = model.compute_mu_from_posterior(
         posterior=post,
@@ -151,6 +161,7 @@ def _posterior_local_elasticity(
         obs_sku_idx=obs_sku_idx,
         X_control=X_control,
         X_cross=None,
+        t_years=t_years,
     )
     denom = (2.0 * h)[np.newaxis, np.newaxis, :]
     return (mu_p - mu_m) / denom
@@ -304,6 +315,7 @@ def plot_response_curve(
     sku: Any,
     price_grid: Iterable[float],
     controls: dict[str, float] | None = None,
+    at_period: Any = None,
     hdi_prob: float = 0.9,
     ax=None,
 ):
@@ -311,7 +323,9 @@ def plot_response_curve(
     Plot predicted quantity vs price for a single SKU.
 
     Requires `sku` + `price_grid` and (if the fitted model included them) the
-    same set of `control_*` features via `controls`.
+    same set of `control_*` features via `controls`. When the model has a
+    time trend, ``at_period`` holds calendar time fixed (default: last training
+    period).
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 4))
@@ -322,6 +336,7 @@ def plot_response_curve(
         price_grid,
         controls,
         hdi_prob=hdi_prob,
+        at_period=at_period,
     )
 
     ax.plot(
@@ -353,6 +368,7 @@ def plot_local_elasticity_vs_price(
     sku: Any,
     price_grid: Iterable[float],
     controls: dict[str, float] | None = None,
+    at_period: Any = None,
     hdi_prob: float = 0.9,
     fd_step: float | None = None,
     ax=None,
@@ -383,12 +399,14 @@ def plot_local_elasticity_vs_price(
     price_grid_arr, log_price, obs_sku_idx, X_control, sku_value = (
         _sku_price_grid_design(model, sku, price_grid, controls)
     )
+    t_years = model._t_years_for_counterfactual(len(price_grid_arr), at_period)
     elast = _posterior_local_elasticity(
         model,
         log_price=log_price,
         obs_sku_idx=obs_sku_idx,
         X_control=X_control,
         fd_step=fd_step,
+        t_years=t_years,
     )
     mean = elast.mean(axis=(0, 1))
     n = mean.shape[0]
@@ -430,6 +448,7 @@ def plot_revenue_vs_price(
     sku: Any,
     price_grid: Iterable[float],
     controls: dict[str, float] | None = None,
+    at_period: Any = None,
     hdi_prob: float = 0.9,
     random_seed: int | None = None,
     ax=None,
@@ -455,6 +474,7 @@ def plot_revenue_vs_price(
         controls,
         hdi_prob=hdi_prob,
         random_seed=random_seed,
+        at_period=at_period,
     )
 
     p = pred[model.price_col].to_numpy(dtype=float)

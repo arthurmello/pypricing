@@ -6,6 +6,7 @@ from pypricing.data.price_panel import (
     PricePanelData,
     floor_censored_fraction,
     parse_period_index,
+    period_to_t_years,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "PricePanelData",
     "floor_censored_fraction",
     "parse_period_index",
+    "period_to_t_years",
 ]
