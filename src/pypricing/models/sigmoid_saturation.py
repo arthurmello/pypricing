@@ -13,7 +13,7 @@ from pypricing.model_components.priors import resolve_prior
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
-from pypricing.model_components.time_terms import get_trend_term
+from pypricing.model_components.time_terms import get_season_term, get_trend_term
 
 
 class SigmoidSaturationDemandModel(DemandModel):
@@ -21,7 +21,7 @@ class SigmoidSaturationDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku - softplus(b_sku * (P - P_center_sku)) + controls + cross + trend``
+    ``mu = alpha_sku - softplus(b_sku * (P - P_center_sku)) + controls + cross + trend + season``
 
     with ``b_sku = -2 * elasticity_sku / P_center_sku`` so elasticity at the center
     equals ``elasticity_sku``. ``log_price_center_sku`` is learned; its prior mean is
@@ -79,6 +79,9 @@ class SigmoidSaturationDemandModel(DemandModel):
             trend_term = get_trend_term(
                 self.model_config, data, trend=self.trend, t0=self.t0_
             )
+            season_term = get_season_term(
+                self.model_config, data, components=self.seasonality_
+            )
 
             b_sku = -2.0 * elasticity_sku / price_center_sku
             z = b_sku[obs_sku] * (price - price_center_sku[obs_sku])
@@ -89,6 +92,7 @@ class SigmoidSaturationDemandModel(DemandModel):
                 + controls_term
                 + self._cross_term(data)
                 + trend_term
+                + season_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model
@@ -102,6 +106,7 @@ class SigmoidSaturationDemandModel(DemandModel):
         X_control: np.ndarray | None,
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
+        X_season: np.ndarray | None = None,
     ) -> np.ndarray:
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
@@ -131,4 +136,5 @@ class SigmoidSaturationDemandModel(DemandModel):
             X_cross=X_cross,
             t_years=t_years,
             obs_sku_idx=obs_sku_idx,
+            X_season=X_season,
         )

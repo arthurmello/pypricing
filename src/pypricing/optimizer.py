@@ -38,12 +38,14 @@ def mean_revenue_at_price(
     log_p = float(np.log(price))
     assert model.idata is not None
     t_years = model._t_years_for_counterfactual(1)
+    X_season = model._season_features_for_counterfactual(1)
     mu = model.compute_mu_from_posterior(
         posterior=model.idata.posterior,
         log_price=np.array([log_p], dtype=np.float64),
         obs_sku_idx=np.array([sku_idx], dtype=np.int64),
         X_control=X_row,
         t_years=t_years,
+        X_season=X_season,
     )
     q = np.exp(mu)
     revenue = price * q

@@ -4,7 +4,8 @@ import json
 import warnings
 from abc import abstractmethod
 from importlib.metadata import PackageNotFoundError, version as pkg_version
-from typing import Any, Iterable, Literal
+from collections.abc import Iterable, Sequence
+from typing import Any, Literal
 
 import arviz as az
 import numpy as np
@@ -26,7 +27,13 @@ from pypricing.data.price_panel import (
     parse_period_index,
     period_to_t_years,
 )
-from pypricing.model_components.time_terms import TrendKind
+from pypricing.model_components.time_terms import (
+    TrendKind,
+    fourier_features,
+    infer_panel_frequency,
+    normalize_seasonality,
+    seasonality_components_for_frequency,
+)
 
 try:
     _PKG_VERSION = pkg_version("pypricing")
@@ -34,13 +41,21 @@ except PackageNotFoundError:  # pragma: no cover
     _PKG_VERSION = "0.0.1"
 
 
+def _seasonality_to_json(
+    value: Literal["auto"] | tuple[str, ...] | None,
+) -> str | list[str] | None:
+    if value is None or value == "auto":
+        return value
+    return list(value)
+
+
 class DemandModel(ModelBuilder):
     """Base class for Bayesian log-demand models on long-format price panels.
 
     Subclasses define the own-price mean curve; this base handles fit/predict,
     optional controls, hierarchical SKU effects via ``PanelColumns.group_columns``,
-    optional linear time trend, optional cross-price terms, plotting helpers, and
-    per-SKU revenue optimization.
+    optional linear time trend, optional calendar seasonality, optional
+    cross-price terms, plotting helpers, and per-SKU revenue optimization.
 
     Parameters
     ----------
@@ -55,6 +70,12 @@ class DemandModel(ModelBuilder):
         date. ``None`` (default) omits the term. ``"shared"`` is one slope;
         ``"sku"`` is a per-SKU slope pooled toward a shared mean (and through
         ``group_columns`` when set). Requires a datetime ``period`` column.
+    seasonality
+        Shared Fourier seasonality in log-quantity. ``None`` (default) omits it.
+        ``"yearly"`` / ``"weekly"`` or a sequence of those add the corresponding
+        harmonics. ``"auto"`` picks components from the panel's date spacing
+        (daily → yearly+weekly; weekly/monthly → yearly). Requires datetime
+        ``period``.
     model_config
         Prior overrides keyed by parameter name, each
         ``{"dist": <PyMC dist>, "kwargs": {...}}``.
@@ -78,6 +99,7 @@ class DemandModel(ModelBuilder):
         panel_columns: PanelColumns | None = None,
         cross_elasticity: CrossElasticitySpec | None = None,
         trend: TrendKind | None = None,
+        seasonality: str | Sequence[str] | None = None,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -85,12 +107,14 @@ class DemandModel(ModelBuilder):
         self.panel_columns = panel_columns or PanelColumns()
         self.cross_elasticity = cross_elasticity
         self.trend = trend
+        self.seasonality = normalize_seasonality(seasonality)
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.log_price_midpoint_sku_: np.ndarray | None = None
         self.data: pd.DataFrame | None = None
         self.cross_pairs_: CrossPairIndex | None = None
         self.t0_: pd.Timestamp | None = None
+        self.seasonality_: tuple[str, ...] | None = None
         self._validate_configuration()
 
     @property
@@ -143,8 +167,12 @@ class DemandModel(ModelBuilder):
         X_control: np.ndarray | None,
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
+        X_season: np.ndarray | None = None,
     ) -> np.ndarray:
         pass
+
+    def _uses_calendar(self) -> bool:
+        return self.trend is not None or self.seasonality is not None
 
     def _validate_configuration(self) -> None:
         if self.trend not in (None, "sku", "shared"):
@@ -193,6 +221,7 @@ class DemandModel(ModelBuilder):
                     else {"mode": ce.mode, "group_level": ce.group_level}
                 ),
                 "trend": json.dumps(self.trend),
+                "seasonality": json.dumps(_seasonality_to_json(self.seasonality)),
             }
         )
         return attrs
@@ -228,11 +257,15 @@ class DemandModel(ModelBuilder):
         )
 
         trend = json.loads(attrs["trend"]) if "trend" in attrs else None
+        seasonality = (
+            json.loads(attrs["seasonality"]) if "seasonality" in attrs else None
+        )
         kwargs.update(
             {
                 "panel_columns": panel_columns,
                 "cross_elasticity": cross_elasticity,
                 "trend": trend,
+                "seasonality": seasonality,
             }
         )
         return kwargs
@@ -276,7 +309,7 @@ class DemandModel(ModelBuilder):
         panel = PricePanelData.from_frame(
             data,
             panel_columns=cols,
-            parse_period=self.trend is not None,
+            parse_period=self._uses_calendar(),
         )
         if self.trend is not None:
             if panel.period_index is None:
@@ -284,6 +317,7 @@ class DemandModel(ModelBuilder):
             self.t0_ = pd.Timestamp(panel.period_index.min())
         else:
             self.t0_ = None
+        self.seasonality_ = self._resolve_seasonality(panel.period_index)
 
         threshold = cols.floor_censoring_warn_threshold
         if threshold is not None:
@@ -367,6 +401,7 @@ class DemandModel(ModelBuilder):
                 "beta_control",
                 "mu_trend",
                 "trend_sku",
+                "beta_season",
             ]
             candidates.append("gamma_pair")
             var_names = [v for v in candidates if v in self.idata.posterior]
@@ -598,29 +633,49 @@ class DemandModel(ModelBuilder):
             return log_price, obs_sku_idx, X
         return log_price, obs_sku_idx, None
 
+    def _resolve_seasonality(
+        self, period_index: pd.DatetimeIndex | None
+    ) -> tuple[str, ...] | None:
+        spec = self.seasonality
+        if spec is None:
+            return None
+        if spec == "auto":
+            if period_index is None:
+                raise RuntimeError("internal: period_index missing with seasonality")
+            freq = infer_panel_frequency(period_index)
+            return seasonality_components_for_frequency(freq, period_index)
+        return spec
+
     def default_counterfactual_period(self) -> pd.Timestamp:
-        """Last training timestamp; used when holding trend fixed along a price grid."""
-        if self.trend is None or self.t0_ is None:
-            raise RuntimeError("default_counterfactual_period requires a fitted trend")
+        """Last training timestamp; used when holding trend/seasonality fixed."""
+        if not self._uses_calendar():
+            raise RuntimeError(
+                "default_counterfactual_period requires trend or seasonality"
+            )
         if self.data is not None and self.period_col in self.data.columns:
             idx = parse_period_index(
                 self.data[self.period_col], period_col=self.period_col
             )
             return pd.Timestamp(idx.max())
-        return self.t0_
+        if self.t0_ is not None:
+            return self.t0_
+        raise RuntimeError("No training periods available for a counterfactual date")
+
+    def _period_index_for_frame(self, df: pd.DataFrame) -> pd.DatetimeIndex:
+        period_col = self.period_col
+        if period_col not in df.columns:
+            raise ValueError(
+                f"Model was fit with trend or seasonality; prediction data needs "
+                f"datetime column {period_col!r}."
+            )
+        return parse_period_index(df[period_col], period_col=period_col)
 
     def _t_years_for_frame(self, df: pd.DataFrame) -> np.ndarray | None:
         if self.trend is None:
             return None
         if self.t0_ is None:
             raise RuntimeError("Model is missing t0_; fit the model first.")
-        period_col = self.period_col
-        if period_col not in df.columns:
-            raise ValueError(
-                f"Model was fit with trend; prediction data needs datetime "
-                f"column {period_col!r}."
-            )
-        idx = parse_period_index(df[period_col], period_col=period_col)
+        idx = self._period_index_for_frame(df)
         return period_to_t_years(idx, self.t0_)
 
     def _t_years_for_counterfactual(
@@ -639,6 +694,35 @@ class DemandModel(ModelBuilder):
         )
         t = period_to_t_years(pd.DatetimeIndex([ts]), self.t0_)[0]
         return np.full(n, t, dtype=np.float64)
+
+    def _season_features_for_index(
+        self, period_index: pd.DatetimeIndex
+    ) -> np.ndarray | None:
+        if not self.seasonality_:
+            return None
+        X, _names = fourier_features(period_index, self.seasonality_)
+        return X
+
+    def _season_features_for_frame(self, df: pd.DataFrame) -> np.ndarray | None:
+        if not self.seasonality_:
+            return None
+        return self._season_features_for_index(self._period_index_for_frame(df))
+
+    def _season_features_for_counterfactual(
+        self,
+        n: int,
+        at_period: pd.Timestamp | str | None = None,
+    ) -> np.ndarray | None:
+        if not self.seasonality_:
+            return None
+        ts = (
+            pd.Timestamp(at_period)
+            if at_period is not None
+            else self.default_counterfactual_period()
+        )
+        row = self._season_features_for_index(pd.DatetimeIndex([ts]))
+        assert row is not None
+        return np.repeat(row, n, axis=0)
 
     def _cross_matrix_for_frame(
         self, df: pd.DataFrame, obs_sku_idx: np.ndarray
@@ -667,6 +751,7 @@ class DemandModel(ModelBuilder):
         log_price, obs_sku_idx, X_control = self._build_prediction_features(df)
         X_cross = self._cross_matrix_for_frame(df, obs_sku_idx)
         t_years = self._t_years_for_frame(df)
+        X_season = self._season_features_for_frame(df)
         post = self.idata.posterior
         sigma = post["sigma"].values
         mu = self.compute_mu_from_posterior(
@@ -676,6 +761,7 @@ class DemandModel(ModelBuilder):
             X_control=X_control,
             X_cross=X_cross,
             t_years=t_years,
+            X_season=X_season,
         )
 
         rng = np.random.default_rng(random_seed)

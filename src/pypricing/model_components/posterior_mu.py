@@ -20,6 +20,19 @@ def add_trend(
     return mu
 
 
+def add_season(
+    mu: np.ndarray,
+    posterior: xr.Dataset,
+    X_season: np.ndarray | None,
+) -> np.ndarray:
+    if X_season is None or "beta_season" not in posterior:
+        return mu
+    if X_season.shape[1] == 0:
+        return mu
+    beta = posterior["beta_season"].values
+    return mu + np.einsum("cdk,ok->cdo", beta, X_season, optimize=True)
+
+
 def add_controls_and_cross(
     mu: np.ndarray,
     posterior: xr.Dataset,
@@ -28,6 +41,7 @@ def add_controls_and_cross(
     *,
     t_years: np.ndarray | None = None,
     obs_sku_idx: np.ndarray | None = None,
+    X_season: np.ndarray | None = None,
 ) -> np.ndarray:
     if X_control is not None:
         beta = posterior["beta_control"].values
@@ -39,4 +53,4 @@ def add_controls_and_cross(
         if obs_sku_idx is None:
             raise ValueError("obs_sku_idx is required when t_years is provided")
         mu = add_trend(mu, posterior, t_years, obs_sku_idx)
-    return mu
+    return add_season(mu, posterior, X_season)

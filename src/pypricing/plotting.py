@@ -106,7 +106,7 @@ def _sku_price_grid_predictions(
         assert controls is not None
         for c in model.control_names_:
             df_pred[c] = float(controls[c])
-    if model.trend is not None:
+    if model._uses_calendar():
         ts = (
             pd.Timestamp(at_period)
             if at_period is not None
@@ -126,6 +126,7 @@ def _posterior_local_elasticity(
     X_control: np.ndarray | None,
     fd_step: float | None = None,
     t_years: np.ndarray | None = None,
+    X_season: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Posterior draws of local own-price elasticity ``d mu / d log p`` on the mean
@@ -154,6 +155,7 @@ def _posterior_local_elasticity(
         X_control=X_control,
         X_cross=None,
         t_years=t_years,
+        X_season=X_season,
     )
     mu_m = model.compute_mu_from_posterior(
         posterior=post,
@@ -162,6 +164,7 @@ def _posterior_local_elasticity(
         X_control=X_control,
         X_cross=None,
         t_years=t_years,
+        X_season=X_season,
     )
     denom = (2.0 * h)[np.newaxis, np.newaxis, :]
     return (mu_p - mu_m) / denom
@@ -400,6 +403,7 @@ def plot_local_elasticity_vs_price(
         _sku_price_grid_design(model, sku, price_grid, controls)
     )
     t_years = model._t_years_for_counterfactual(len(price_grid_arr), at_period)
+    X_season = model._season_features_for_counterfactual(len(price_grid_arr), at_period)
     elast = _posterior_local_elasticity(
         model,
         log_price=log_price,
@@ -407,6 +411,7 @@ def plot_local_elasticity_vs_price(
         X_control=X_control,
         fd_step=fd_step,
         t_years=t_years,
+        X_season=X_season,
     )
     mean = elast.mean(axis=(0, 1))
     n = mean.shape[0]
