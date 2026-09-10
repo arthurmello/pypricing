@@ -326,9 +326,9 @@ def plot_response_curve(
     Plot predicted quantity vs price for a single SKU.
 
     Requires `sku` + `price_grid` and (if the fitted model included them) the
-    same set of `control_*` features via `controls`. When the model has a
-    time trend, ``at_period`` holds calendar time fixed (default: last training
-    period).
+    same set of `control_*` features via `controls`. When the model was fit
+    with a time trend or seasonality, ``at_period`` holds calendar time fixed
+    (default: last training period).
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 4))
@@ -380,7 +380,7 @@ def plot_local_elasticity_vs_price(
     Plot local own-price elasticity along ``price_grid`` for one SKU.
 
     Elasticity is ``d mu / d (log p)`` on the mean log-quantity path from the
-    fitted surface (holding controls fixed). For ``Q_mean approx exp(mu)`` this
+    fitted surface (holding controls and calendar time fixed). For ``Q_mean approx exp(mu)`` this
     matches ``d log Q_mean / d log p``. On a plain log-log model it is **flat**
     in price and aligns with ``elasticity_sku``.
 

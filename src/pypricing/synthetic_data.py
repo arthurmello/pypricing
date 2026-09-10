@@ -605,8 +605,11 @@ def generate_mock_data(
     cross_elasticity_group_level
         Required for ``\"within_group\"``: index into the hierarchy (``0`` = coarsest).
     include_seasonality
-        If ``True`` (default), add a sinusoidal seasonality term to mean log-quantity.
-        Set ``False`` for cleaner parameter-recovery experiments.
+        If ``True`` (default), add a sinusoidal term to mean log-quantity.
+        With ``start_date``, this is a yearly sine on day-of-year (matches
+        ``seasonality="yearly"``). Without ``start_date``, it is a sine over
+        integer ``0 … n_periods-1`` that the model cannot fit as Fourier —
+        pass ``False`` unless you are using a dated panel.
     round_quantity
         If ``True`` (default), store integer quantities (clipped at 1). Set ``False``
         to keep continuous quantity / ``log_quantity`` (useful for recovery tests).

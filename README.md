@@ -6,6 +6,8 @@ This is currently an MVP for log-demand panels (per-SKU intercept + per-SKU elas
 
 - optional **shared control** regressors (`control_`* columns)
 - optional **hierarchical / partial pooling** across group columns
+- optional **linear time trend** (`trend="shared"` or `"sku"`)
+- optional **calendar seasonality** (`seasonality="yearly"` / `"weekly"` / `"auto"`)
 - optional **cross-price elasticities** (`CrossElasticitySpec`)
 - simple diagnostics + plotting helpers
 - posterior predictive simulation for counterfactual price scenarios
@@ -47,7 +49,8 @@ from pypricing import LogLogDemandModel, generate_mock_data
 df = generate_mock_data(
     n_periods=20,
     n_skus=5,
-    n_controls=2,     # creates control_1, control_2
+    n_controls=2,              # creates control_1, control_2
+    include_seasonality=False, # no calendar terms in this example
     random_state=0,
 )
 
@@ -91,7 +94,9 @@ _ = model.plot_response_curve(sku=sku0, price_grid=price_grid, controls=controls
 - **Optional**
   - `control_`* columns (or pass an explicit `control_columns=(...)` via `PanelColumns`) — must be numeric, no NaNs
   - hierarchy columns (e.g. `category_1`, `category_2`) via `PanelColumns(group_columns=...)`
-  - `period` (and often `region`) for `fit_train_test()` / cross-elasticity market cells
+  - `period` (and often `region`) for `fit_train_test()` / cross-elasticity market cells.
+    Integer or string keys are fine. **Datetime `period` is required** if you enable
+    `trend` or `seasonality` (integer indexes are not treated as Unix times).
 
 Internally the model works on logs:
 
@@ -108,7 +113,7 @@ At a high level this package fits **log-demand** with Gaussian noise:
 \log Q \sim \mathcal{N}(\mu, \sigma)
 
 
-Where \mu is a per-SKU demand curve plus optional global control effects.
+Where \mu is a per-SKU demand curve plus optional controls, trend, and seasonality.
 
 ### Demand curve model classes
 
@@ -123,7 +128,7 @@ Pick the model class directly:
 Constant elasticity log-log:
 
 
-$\mu = \alpha_{\text{sku}} + \epsilon_{\text{sku}} \log P + X\beta$
+$\mu = \alpha_{\text{sku}} + \epsilon_{\text{sku}} \log P + X\beta + \text{trend} + \text{season}$
 
 
 - **Interpretation**: \epsilon_{\text{sku}} is own-price elasticity.
@@ -135,7 +140,7 @@ $\mu = \alpha_{\text{sku}} + \epsilon_{\text{sku}} \log P + X\beta$
 Allows elasticity to vary with price (curvature in log-price):
 
 
-$\mu = \alpha_{\text{sku}} + \beta_{1,\text{sku}}\log P + c_{\text{sku}} (\log P)^2 + X\beta$
+$\mu = \alpha_{\text{sku}} + \beta_{1,\text{sku}}\log P + c_{\text{sku}} (\log P)^2 + X\beta + \text{trend} + \text{season}$
 
 
 This parameterization enforces that the elasticity at a **per-SKU midpoint price** equals `elasticity_sku`.
@@ -148,7 +153,7 @@ The midpoint is computed from the training data as the **median** log-price per 
 Saturating response curve in **level price** (softplus / log-sigmoid form):
 
 
-\mu = \alpha_{\text{sku}} - \mathrm{softplus}(b_{\text{sku}}(P - P_{\text{center,sku}})) + X\beta
+\mu = \alpha_{\text{sku}} - \mathrm{softplus}(b_{\text{sku}}(P - P_{\text{center,sku}})) + X\beta + \text{trend} + \text{season}
 
 
 The per-SKU **center** `P_{\text{center,sku}} = \exp(\texttt{log\_price\_center\_sku})` is a **learned** parameter.
@@ -156,6 +161,42 @@ Its prior is centered at the empirical per-SKU median log-price from training da
 The curve is parameterized so the elasticity at `P_{\text{center,sku}}` equals `elasticity_sku` (via `b_sku = -2 * elasticity_sku / price_center_sku`).
 
 - **Best when**: response “flattens out” at extreme prices (a simple saturation behavior).
+
+### Trend and seasonality
+
+`period` is the market-cell clock. Leave `trend` / `seasonality` as `None` (the
+default) and integer periods still work. Turning either on requires a **datetime**
+`period` column.
+
+```python
+from pypricing import LogLogDemandModel, generate_mock_data
+
+df = generate_mock_data(
+    n_periods=2 * 52,
+    n_skus=6,
+    start_date="2020-01-06",  # writes a calendar into period
+    freq="W",
+    include_seasonality=True,  # yearly sine on day-of-year
+    volume_trend=0.08,         # shared annual log-growth; needs start_date
+    round_quantity=False,
+    random_state=0,
+)
+model = LogLogDemandModel(trend="shared", seasonality="auto")
+model.fit(df, draws=500, tune=500, chains=2, random_seed=0)
+```
+
+- **`trend`**: `"shared"` is one slope `mu_trend * t`; `"sku"` is a per-SKU slope
+  pooled toward that mean (`t` is years since the first training date).
+- **`seasonality`**: shared Fourier terms (not per-SKU). `"yearly"` / `"weekly"`
+  or a sequence of those. `"auto"` picks from the panel grain (daily →
+  yearly+weekly; weekly/monthly → yearly).
+- Plots and `optimize_prices` hold the calendar at the **last training date**
+  (`at_period=` to override). Prediction needs a datetime `period` column.
+
+`generate_mock_data(..., include_seasonality=True)` **without** `start_date`
+still adds a sine over integer `0 … n_periods-1`. That is not calendar
+seasonality, and the model cannot fit it as Fourier (ints are rejected). Pass
+`include_seasonality=False` unless you are using a dated panel.
 
 ### Controls (`control_`*)
 
@@ -199,6 +240,8 @@ Defaults today:
 - `elasticity_sku ~ Normal(mu=-1, sigma=2)`
 - `sigma ~ HalfNormal(sigma=0.5)`
 - `beta_control ~ Normal(mu=0, sigma=0.5)` (if controls exist)
+- `mu_trend ~ Normal(mu=0, sigma=0.05)` (if `trend` is set)
+- `beta_season ~ Normal(mu=0, sigma=0.5)` (if `seasonality` is set)
 - `curvature_sku ~ Normal(mu=0, sigma=0.2)` (only for `quadratic`)
 - `log_price_center_sku ~ Normal(mu=log_price_midpoint_sku_, sigma=0.5)` (only for `sigmoid`)
 
@@ -214,6 +257,7 @@ Prediction requires:
 
 - `sku` and `price`
 - all control columns used during fit (if any)
+- datetime `period` if the model was fit with `trend` or `seasonality`
 - `quantity` is **not** required
 
 Unknown SKUs at prediction time raise an error (no cold-start handling yet).
@@ -255,7 +299,9 @@ This is only valid for `LogLogDemandModel` (constant elasticity).
 ```python
 from pypricing import LogLogDemandModel, generate_mock_data
 
-df = generate_mock_data(n_periods=20, n_skus=5, n_controls=1, random_state=0)
+df = generate_mock_data(
+    n_periods=20, n_skus=5, n_controls=1, include_seasonality=False, random_state=0
+)
 model = LogLogDemandModel()
 model.fit(df, draws=500, tune=500, chains=2, random_seed=0)
 
