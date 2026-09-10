@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pypricing.data import PanelColumns, PricePanelData
+from pypricing.data import PanelColumns, PricePanelData, parse_period_index
 
 
 def test_from_frame_basic():
@@ -121,3 +121,87 @@ def test_group_columns_inconsistent_per_sku_raises():
         PricePanelData.from_frame(
             df, panel_columns=PanelColumns(group_columns=("category_1",))
         )
+
+
+def _period_frame(period) -> pd.DataFrame:
+    n = len(period)
+    return pd.DataFrame(
+        {
+            "sku": ["a"] * n,
+            "price": [10.0] * n,
+            "quantity": [1.0] * n,
+            "period": period,
+        }
+    )
+
+
+def test_parse_period_index_datetime():
+    values = pd.date_range("2024-01-01", periods=3, freq="W")
+    idx = parse_period_index(values)
+    assert isinstance(idx, pd.DatetimeIndex)
+    assert idx.tz is None
+    assert list(idx) == list(values)
+
+
+def test_parse_period_index_strings():
+    idx = parse_period_index(pd.Series(["2024-01-01", "2024-01-08"]))
+    assert idx[0] == pd.Timestamp("2024-01-01")
+    assert idx[1] == pd.Timestamp("2024-01-08")
+
+
+def test_parse_period_index_tz_aware_to_naive_utc():
+    values = pd.date_range("2024-01-01", periods=2, freq="D", tz="US/Eastern")
+    idx = parse_period_index(values)
+    assert idx.tz is None
+    assert idx[0] == pd.Timestamp("2024-01-01 05:00:00")
+
+
+def test_parse_period_index_rejects_numeric():
+    with pytest.raises(ValueError, match="numeric"):
+        parse_period_index(pd.Series([0, 1, 2]))
+    with pytest.raises(ValueError, match="numeric"):
+        parse_period_index(pd.Series([0.0, 1.0]))
+    with pytest.raises(ValueError, match="numeric"):
+        parse_period_index(pd.Series([0, 1, 2], dtype=object))
+
+
+def test_parse_period_index_rejects_unparseable_strings():
+    with pytest.raises(ValueError, match="could not be parsed"):
+        parse_period_index(pd.Series(["week_1", "week_2"]))
+
+
+def test_parse_period_index_rejects_nat():
+    with pytest.raises(ValueError, match="NaN/NaT"):
+        parse_period_index(pd.Series([pd.Timestamp("2024-01-01"), pd.NaT]))
+
+
+def test_from_frame_integer_period_leaves_index_none():
+    d = PricePanelData.from_frame(_period_frame([0, 1, 2]))
+    assert d.period_index is None
+
+
+def test_from_frame_datetime_period_attaches_index():
+    periods = pd.date_range("2024-01-01", periods=3, freq="W")
+    d = PricePanelData.from_frame(_period_frame(periods))
+    assert d.period_index is not None
+    assert len(d.period_index) == d.n_obs
+    assert d.period_index.equals(pd.DatetimeIndex(periods))
+
+
+def test_from_frame_parse_period_strings():
+    d = PricePanelData.from_frame(
+        _period_frame(["2024-01-01", "2024-01-08"]), parse_period=True
+    )
+    assert d.period_index is not None
+    assert d.period_index[0] == pd.Timestamp("2024-01-01")
+
+
+def test_from_frame_parse_period_rejects_integer():
+    with pytest.raises(ValueError, match="numeric"):
+        PricePanelData.from_frame(_period_frame([0, 1]), parse_period=True)
+
+
+def test_from_frame_parse_period_requires_column():
+    df = pd.DataFrame({"sku": ["a"], "price": [1.0], "quantity": [1.0]})
+    with pytest.raises(ValueError, match="Missing period column"):
+        PricePanelData.from_frame(df, parse_period=True)

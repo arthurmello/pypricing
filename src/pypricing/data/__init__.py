@@ -5,6 +5,7 @@ from pypricing.data.price_panel import (
     PanelColumns,
     PricePanelData,
     floor_censored_fraction,
+    parse_period_index,
 )
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "PanelColumns",
     "PricePanelData",
     "floor_censored_fraction",
+    "parse_period_index",
 ]

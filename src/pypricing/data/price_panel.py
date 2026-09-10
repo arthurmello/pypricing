@@ -11,6 +11,66 @@ import pandas as pd
 
 from pypricing.data.index import CrossPairIndex, HierarchyIndex
 
+_NUMERIC_PERIOD_MSG = (
+    "{period_col!r} is numeric; map it to timestamps before using trend or "
+    "seasonality (integer periods are not calendar dates)."
+)
+
+
+def _as_naive_datetime_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    if idx.tz is not None:
+        return idx.tz_convert("UTC").tz_localize(None)
+    return idx
+
+
+def _is_datetime_like(series: pd.Series) -> bool:
+    dtype = series.dtype
+    return bool(
+        pd.api.types.is_datetime64_any_dtype(dtype)
+        or isinstance(dtype, pd.DatetimeTZDtype)
+        or isinstance(dtype, pd.PeriodDtype)
+    )
+
+
+def parse_period_index(
+    values: pd.Series | pd.Index | np.ndarray | list[Any],
+    *,
+    period_col: str = "period",
+) -> pd.DatetimeIndex:
+    """Convert a period column to naive UTC timestamps.
+
+    Accepts datetime-like values and strings that all parse. Rejects numeric
+    values (including numeric object columns) so integer period indices are
+    not silently treated as Unix times.
+    """
+    series = pd.Series(values)
+    if series.isna().any():
+        raise ValueError(f"NaN/NaT in {period_col!r} are not allowed")
+
+    if isinstance(series.dtype, pd.PeriodDtype):
+        series = series.dt.to_timestamp()
+
+    if _is_datetime_like(series):
+        return _as_naive_datetime_index(pd.DatetimeIndex(series))
+
+    if pd.api.types.is_numeric_dtype(series):
+        raise ValueError(_NUMERIC_PERIOD_MSG.format(period_col=period_col))
+
+    as_numeric = pd.to_numeric(series, errors="coerce")
+    if as_numeric.notna().all():
+        raise ValueError(_NUMERIC_PERIOD_MSG.format(period_col=period_col))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        parsed = pd.to_datetime(series, errors="coerce")
+    if parsed.isna().any():
+        examples = series[parsed.isna()].head(3).tolist()
+        raise ValueError(
+            f"{period_col!r} could not be parsed as dates (examples: {examples}). "
+            "Pass a datetime column."
+        )
+    return _as_naive_datetime_index(pd.DatetimeIndex(parsed))
+
 
 @dataclass(frozen=True)
 class PanelColumns:
@@ -182,6 +242,8 @@ class PricePanelData:
     """Shape ``(n_obs, n_cross_pairs)``: log competitor prices for directed cross pairs."""
     cross_pairs: CrossPairIndex | None = None
     """Directed pair / pool index when cross-elasticity is enabled."""
+    period_index: pd.DatetimeIndex | None = None
+    """Row-aligned timestamps when ``period_col`` is datetime (or parsed)."""
 
     @property
     def n_cross_pairs(self) -> int:
@@ -197,6 +259,7 @@ class PricePanelData:
         df: pd.DataFrame,
         *,
         panel_columns: PanelColumns | None = None,
+        parse_period: bool = False,
     ) -> PricePanelData:
         """
         Parameters
@@ -206,6 +269,10 @@ class PricePanelData:
             defaults. ``quantity_floor`` is applied as
             ``log(max(quantity, quantity_floor))``. ``group_columns`` are optional
             hierarchy columns, coarse → fine, constant within each SKU.
+        parse_period
+            If ``True``, require ``period_col`` and convert it with
+            :func:`parse_period_index`. If ``False`` (default), attach
+            ``period_index`` only when the column is already datetime-like.
         """
         cols = panel_columns or PanelColumns()
         sku_col = cols.sku_col
@@ -302,6 +369,19 @@ class PricePanelData:
         else:
             control_matrix = np.empty((len(sub), 0), dtype=np.float64)
 
+        period_index: pd.DatetimeIndex | None = None
+        period_col = cols.period_col
+        if parse_period:
+            if period_col not in df.columns:
+                raise ValueError(f"Missing period column: {period_col!r}")
+            period_index = parse_period_index(
+                df[period_col], period_col=period_col
+            )
+        elif period_col in df.columns and _is_datetime_like(df[period_col]):
+            period_index = parse_period_index(
+                df[period_col], period_col=period_col
+            )
+
         return cls(
             log_price=log_price,
             log_quantity=log_quantity,
@@ -312,6 +392,7 @@ class PricePanelData:
             control_names=tuple(control_columns),
             n_obs=int(len(sub)),
             hierarchy=hierarchy,
+            period_index=period_index,
         )
 
     @staticmethod
