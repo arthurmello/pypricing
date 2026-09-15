@@ -44,6 +44,9 @@ class MockDataTruth:
     control_coefs: np.ndarray | None
     gamma_pair: dict[tuple[int, int], float] | None
     volume_trend: float
+    n_instruments: int = 0
+    instrument_coef: float = 0.0
+    endogeneity: float = 0.0
 
 
 @dataclass
@@ -80,6 +83,10 @@ class _PanelSim:
     include_seasonality: bool
     round_quantity: bool
     volume_trend: float
+    n_instruments: int
+    instrument_coef: float
+    endogeneity: float
+    noise_sigma: float
 
 
 def _as_rng(random_state: RandomState) -> np.random.Generator:
@@ -181,6 +188,7 @@ def _validate_kwargs(
     *,
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
+    n_instruments: int = 0,
 ) -> str | None:
     if n_periods <= 0:
         raise ValueError("n_periods must be positive")
@@ -202,6 +210,8 @@ def _validate_kwargs(
         raise ValueError("n_regions must be >= 1 when not None")
     if n_controls < 0:
         raise ValueError("n_controls must be non-negative")
+    if n_instruments < 0:
+        raise ValueError("n_instruments must be non-negative")
 
     ce = parse_cross_elasticity_mode(cross_elasticity)
     if ce is not None:
@@ -377,12 +387,26 @@ def _simulate_panel_rows(
 ) -> list[dict]:
     rows: list[dict] = []
     beta_season = _PANEL_SEASON_BETA
-    sigma = _PANEL_NOISE_SIGMA
+    sigma = sim.noise_sigma
     hierarchy = sim.effects.hierarchy
 
     for s in range(sim.n_skus):
         for r in range(sim.n_reg):
-            log_price = sim.log_price_panel[s, r, :]
+            log_price = np.asarray(sim.log_price_panel[s, r, :], dtype=np.float64).copy()
+            demand_shock = rng.normal(0, sigma, size=sim.n_periods)
+
+            if sim.n_instruments:
+                instruments = rng.normal(size=(sim.n_periods, sim.n_instruments))
+                log_price = (
+                    log_price
+                    + sim.instrument_coef * instruments.sum(axis=1)
+                )
+            else:
+                instruments = None
+
+            if sim.endogeneity:
+                log_price = log_price + sim.endogeneity * demand_shock
+
             price = np.exp(log_price)
 
             season = (
@@ -415,7 +439,7 @@ def _simulate_panel_rows(
                 + season_term
                 + ctrl_term
                 + trend_term
-                + rng.normal(0, sigma, size=sim.n_periods)
+                + demand_shock
             )
             mean_log_q = _mean_log_quantity(
                 demand_shape=sim.demand_shape,
@@ -477,6 +501,10 @@ def _simulate_panel_rows(
                 if controls is not None:
                     for k in range(sim.n_controls):
                         row[f"control_{k + 1}"] = round(float(controls[t, k]), 4)
+                if instruments is not None:
+                    for k in range(sim.n_instruments):
+                        z = float(instruments[t, k])
+                        row[f"iv_{k + 1}"] = round(z, 4) if sim.round_quantity else z
                 rows.append(row)
 
     return rows
@@ -501,6 +529,10 @@ def generate_mock_data(
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
+    n_instruments: int = 0,
+    instrument_coef: float = 0.5,
+    endogeneity: float = 0.0,
+    noise_sigma: float | None = None,
     return_truth: Literal[False] = False,
 ) -> pd.DataFrame: ...
 
@@ -524,6 +556,10 @@ def generate_mock_data(
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
+    n_instruments: int = 0,
+    instrument_coef: float = 0.5,
+    endogeneity: float = 0.0,
+    noise_sigma: float | None = None,
     return_truth: Literal[True],
 ) -> tuple[pd.DataFrame, MockDataTruth]: ...
 
@@ -546,6 +582,10 @@ def generate_mock_data(
     round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
+    n_instruments: int = 0,
+    instrument_coef: float = 0.5,
+    endogeneity: float = 0.0,
+    noise_sigma: float | None = None,
     return_truth: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, MockDataTruth]:
     """
@@ -567,6 +607,8 @@ def generate_mock_data(
     Common additions: region shift, controls, seasonality, Gaussian noise.
 
     Prices use a random walk on log scale (one series per SKU–region path).
+    Optional ``iv_*`` columns shift log-price; ``endogeneity`` leaks the demand
+    shock into log-price so OLS elasticity is biased.
 
     Parameters
     ----------
@@ -619,6 +661,16 @@ def generate_mock_data(
     volume_trend
         Shared annual log-quantity growth (e.g. ``0.1`` ≈ +10%/year). Requires
         ``start_date``. Stored on :class:`MockDataTruth` when ``return_truth=True``.
+    n_instruments
+        Count of ``iv_1`` … columns (standard normals). Each shifts log-price by
+        ``instrument_coef`` (exclusion restriction: they do not enter demand).
+    instrument_coef
+        Shared first-stage slope on each instrument (default ``0.5``).
+    endogeneity
+        Loading of the demand shock onto log-price (default ``0.0`` = exogenous
+        prices). Positive values bias associational elasticity toward zero.
+    noise_sigma
+        Std of the Gaussian demand shock (default ``0.12``).
     return_truth
         If ``True``, also return a :class:`MockDataTruth` with per-SKU DGP
         parameters (and optional cross / control draws).
@@ -628,7 +680,7 @@ def generate_mock_data(
     pandas.DataFrame or tuple
         Columns: ``sku``, ``period``, ``price``, ``quantity``, ``log_price``,
         ``log_quantity``, optional ``category`` or ``category_1`` …, ``region``,
-        ``control_*``. With ``return_truth=True``, ``(frame, truth)``.
+        ``control_*``, ``iv_*``. With ``return_truth=True``, ``(frame, truth)``.
     """
     ce = _validate_kwargs(
         n_periods,
@@ -639,6 +691,7 @@ def generate_mock_data(
         n_controls,
         cross_elasticity=cross_elasticity,
         cross_elasticity_group_level=cross_elasticity_group_level,
+        n_instruments=n_instruments,
     )
 
     demand_shape = _parse_demand_shape(shape)
@@ -647,6 +700,10 @@ def generate_mock_data(
         raise ValueError("price_shock_sigma must be positive")
     if volume_trend != 0.0 and start_date is None:
         raise ValueError("volume_trend requires start_date")
+    if noise_sigma is None:
+        noise_sigma = _PANEL_NOISE_SIGMA
+    elif noise_sigma <= 0:
+        raise ValueError("noise_sigma must be positive")
 
     rng = _as_rng(random_state)
 
@@ -727,6 +784,10 @@ def generate_mock_data(
             include_seasonality=include_seasonality,
             round_quantity=round_quantity,
             volume_trend=float(volume_trend),
+            n_instruments=int(n_instruments),
+            instrument_coef=float(instrument_coef),
+            endogeneity=float(endogeneity),
+            noise_sigma=float(noise_sigma),
         ),
     )
     df = pd.DataFrame(rows)
@@ -744,7 +805,7 @@ def generate_mock_data(
             if effects.curvature is None
             else np.asarray(effects.curvature, dtype=np.float64).copy()
         ),
-        noise_sigma=float(_PANEL_NOISE_SIGMA),
+        noise_sigma=float(noise_sigma),
         control_coefs=(
             None
             if control_coefs is None
@@ -752,5 +813,8 @@ def generate_mock_data(
         ),
         gamma_pair=None if gamma_map is None else dict(gamma_map),
         volume_trend=float(volume_trend),
+        n_instruments=int(n_instruments),
+        instrument_coef=float(instrument_coef),
+        endogeneity=float(endogeneity),
     )
     return df, truth

@@ -14,17 +14,34 @@ def get_sigma(model_config: dict[str, Any] | None) -> Any:
     )
 
 
-def get_controls_term(model_config: dict[str, Any] | None, data: PricePanelData) -> Any:
-    controls_term = 0.0
-    k = data.control_matrix.shape[1]
-    if k > 0:
-        X = pt.constant(data.control_matrix)
-        beta = resolve_prior(
-            model_config=model_config,
-            param_name="beta_control",
-            default_dist=pm.Normal,
-            default_kwargs={"mu": 0.0, "sigma": 0.5},
-            shape=k,
-        )
-        controls_term = pt.dot(X, beta)
-    return controls_term
+def get_linear_term(
+    model_config: dict[str, Any] | None,
+    matrix: Any,
+    *,
+    param_name: str,
+    default_sigma: float = 0.5,
+) -> Any:
+    k = matrix.shape[1]
+    if k == 0:
+        return 0.0
+    beta = resolve_prior(
+        model_config=model_config,
+        param_name=param_name,
+        default_dist=pm.Normal,
+        default_kwargs={"mu": 0.0, "sigma": default_sigma},
+        shape=k,
+    )
+    return pt.dot(pt.constant(matrix), beta)
+
+
+def get_controls_term(
+    model_config: dict[str, Any] | None,
+    data: PricePanelData,
+    *,
+    param_name: str = "beta_control",
+) -> Any:
+    return get_linear_term(
+        model_config,
+        data.control_matrix,
+        param_name=param_name,
+    )

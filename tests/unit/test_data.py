@@ -19,6 +19,8 @@ def test_from_frame_basic():
     assert np.allclose(d.log_price[1], 1.0)
     assert np.allclose(d.log_quantity[0], np.log(100.0))
     assert d.control_matrix.shape == (3, 0)
+    assert d.iv_matrix.shape == (3, 0)
+    assert d.n_iv == 0
     assert np.array_equal(d.obs_sku_idx, [0, 0, 1])
 
 
@@ -46,6 +48,70 @@ def test_auto_controls():
     d = PricePanelData.from_frame(df)
     assert d.control_names == ("control_1",)
     assert d.control_matrix.shape == (4, 1)
+
+
+def test_auto_iv_columns():
+    df = pd.DataFrame(
+        {
+            "sku": ["x"] * 3,
+            "price": [2.0, 2.0, 2.0],
+            "quantity": [10.0, 10.0, 10.0],
+            "iv_cost": [0.1, 0.2, 0.3],
+        }
+    )
+    d = PricePanelData.from_frame(df)
+    assert d.iv_names == ("iv_cost",)
+    assert d.n_iv == 1
+    assert d.iv_matrix.shape == (3, 1)
+
+
+def test_explicit_iv_columns_and_empty_disables_auto():
+    df = pd.DataFrame(
+        {
+            "sku": ["x", "x"],
+            "price": [1.0, 1.0],
+            "quantity": [2.0, 2.0],
+            "iv_1": [0.0, 0.1],
+            "cost": [1.0, 2.0],
+        }
+    )
+    d = PricePanelData.from_frame(
+        df, panel_columns=PanelColumns(iv_columns=("cost",))
+    )
+    assert d.iv_names == ("cost",)
+    ignored = PricePanelData.from_frame(
+        df, panel_columns=PanelColumns(iv_columns=())
+    )
+    assert ignored.iv_names == ()
+    assert ignored.n_iv == 0
+
+
+def test_iv_overlap_controls_rejected():
+    df = pd.DataFrame(
+        {
+            "sku": ["a"],
+            "price": [1.0],
+            "quantity": [1.0],
+            "control_1": [0.0],
+        }
+    )
+    with pytest.raises(ValueError, match="overlap control_columns"):
+        PricePanelData.from_frame(
+            df, panel_columns=PanelColumns(iv_columns=("control_1",))
+        )
+
+
+def test_iv_nan_rejected():
+    df = pd.DataFrame(
+        {
+            "sku": ["a", "a"],
+            "price": [1.0, 1.0],
+            "quantity": [2.0, 2.0],
+            "iv_1": [0.0, np.nan],
+        }
+    )
+    with pytest.raises(ValueError, match="instrument"):
+        PricePanelData.from_frame(df)
 
 
 def test_explicit_controls_subset():

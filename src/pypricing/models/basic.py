@@ -60,8 +60,10 @@ class DemandModel(ModelBuilder):
     Parameters
     ----------
     panel_columns
-        Column names and panel knobs (SKU / price / quantity, controls, hierarchy,
-        period / region). Defaults to ``PanelColumns()``.
+        Column names and panel knobs (SKU / price / quantity, controls,
+        instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
+        ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
+        IV on :class:`LogLogDemandModel` only.
     cross_elasticity
         If set, add directed cross-price effects (``CrossElasticitySpec``). Requires
         a balanced market cell per ``period`` (and ``region`` when used).
@@ -110,6 +112,7 @@ class DemandModel(ModelBuilder):
         self.seasonality = normalize_seasonality(seasonality)
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
+        self.iv_names_: tuple[str, ...] = ()
         self.log_price_midpoint_sku_: np.ndarray | None = None
         self.data: pd.DataFrame | None = None
         self.cross_pairs_: CrossPairIndex | None = None
@@ -140,6 +143,10 @@ class DemandModel(ModelBuilder):
     @property
     def control_columns(self) -> tuple[str, ...] | None:
         return self.panel_columns.control_columns
+
+    @property
+    def iv_columns(self) -> tuple[str, ...] | None:
+        return self.panel_columns.iv_columns
 
     @property
     def group_columns(self) -> tuple[str, ...] | None:
@@ -209,6 +216,7 @@ class DemandModel(ModelBuilder):
                         "quantity_col": cols.quantity_col,
                         "quantity_floor": cols.quantity_floor,
                         "control_columns": cols.control_columns,
+                        "iv_columns": cols.iv_columns,
                         "group_columns": cols.group_columns,
                         "period_col": cols.period_col,
                         "region_col": cols.region_col,
@@ -241,6 +249,7 @@ class DemandModel(ModelBuilder):
 
         pc = json.loads(attrs["panel_columns"])
         control_raw = pc.get("control_columns")
+        iv_raw = pc.get("iv_columns")
         group_raw = pc.get("group_columns")
         panel_columns = PanelColumns(
             sku_col=pc["sku_col"],
@@ -248,6 +257,7 @@ class DemandModel(ModelBuilder):
             quantity_col=pc["quantity_col"],
             quantity_floor=float(pc["quantity_floor"]),
             control_columns=tuple(control_raw) if control_raw is not None else None,
+            iv_columns=tuple(iv_raw) if iv_raw is not None else None,
             group_columns=tuple(group_raw) if group_raw is not None else None,
             period_col=pc.get("period_col", "period"),
             region_col=pc.get("region_col"),
@@ -359,6 +369,7 @@ class DemandModel(ModelBuilder):
         self.model = self._build_pymc_model(panel)
         self.sku_levels_ = panel.sku_levels
         self.control_names_ = panel.control_names
+        self.iv_names_ = panel.iv_names
         self.data = data.copy()
 
     def build_from_idata(self, idata: az.InferenceData) -> None:
@@ -402,6 +413,11 @@ class DemandModel(ModelBuilder):
                 "mu_trend",
                 "trend_sku",
                 "beta_season",
+                "rho",
+                "pi",
+                "sigma_price",
+                "alpha_price_sku",
+                "beta_control_price",
             ]
             candidates.append("gamma_pair")
             var_names = [v for v in candidates if v in self.idata.posterior]
@@ -448,6 +464,39 @@ class DemandModel(ModelBuilder):
             }
         else:
             out["floor_censored_skus"] = {}
+        out.update(self._iv_diagnostics())
+        return out
+
+    def _iv_diagnostics(self, *, hdi_prob: float = 0.9) -> dict[str, Any]:
+        """Weak-IV and endogeneity flags from the control-function posterior."""
+        assert self.idata is not None
+        post = self.idata.posterior
+        if "rho" not in post and "pi" not in post:
+            return {}
+
+        out: dict[str, Any] = {}
+        alpha = (1.0 - hdi_prob) / 2.0
+        if "rho" in post:
+            rho = np.asarray(post["rho"].values, dtype=np.float64).ravel()
+            out["rho_mean"] = float(np.mean(rho))
+            lo, hi = np.quantile(rho, [alpha, 1.0 - alpha])
+            out["rho_hdi"] = (float(lo), float(hi))
+            out["rho_hdi_includes_zero"] = bool(lo <= 0.0 <= hi)
+        if "pi" in post:
+            pi = np.asarray(post["pi"].values, dtype=np.float64)
+            if pi.ndim == 2:
+                pi = pi[:, :, None]
+            flat = pi.reshape(-1, pi.shape[-1])
+            lo = np.quantile(flat, alpha, axis=0)
+            hi = np.quantile(flat, 1.0 - alpha, axis=0)
+            includes_zero = (lo <= 0.0) & (hi >= 0.0)
+            names = list(self.iv_names_) or [
+                f"pi[{i}]" for i in range(flat.shape[1])
+            ]
+            out["weak_iv_instruments"] = [
+                names[i] for i in range(len(includes_zero)) if bool(includes_zero[i])
+            ]
+            out["weak_iv"] = bool(np.all(includes_zero))
         return out
 
     def graphviz(self):

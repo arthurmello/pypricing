@@ -191,3 +191,36 @@ def test_volume_trend_changes_quantity():
     assert not np.allclose(
         df0["log_quantity"].to_numpy(), df1["log_quantity"].to_numpy()
     )
+
+
+def test_instruments_add_iv_columns():
+    df, truth = generate_mock_data(
+        n_periods=6,
+        n_skus=2,
+        n_instruments=2,
+        random_state=0,
+        return_truth=True,
+    )
+    assert "iv_1" in df.columns and "iv_2" in df.columns
+    assert truth.n_instruments == 2
+    assert df["iv_1"].std() > 0
+
+
+def test_endogeneity_changes_price():
+    kwargs = dict(
+        n_periods=20,
+        n_skus=2,
+        n_instruments=1,
+        random_state=0,
+        include_seasonality=False,
+        round_quantity=False,
+        price_shock_sigma=0.02,
+    )
+    df0 = generate_mock_data(**kwargs, endogeneity=0.0)
+    df1 = generate_mock_data(**kwargs, endogeneity=1.5)
+    assert not np.allclose(df0["price"].to_numpy(), df1["price"].to_numpy())
+
+
+def test_n_instruments_negative():
+    with pytest.raises(ValueError, match="n_instruments"):
+        generate_mock_data(n_periods=4, n_skus=2, n_instruments=-1, random_state=0)

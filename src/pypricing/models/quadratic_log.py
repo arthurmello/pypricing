@@ -11,6 +11,7 @@ from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
+from pypricing.model_components.iv_terms import raise_if_iv_not_supported
 
 
 class QuadraticLogDemandModel(DemandModel):
@@ -30,6 +31,7 @@ class QuadraticLogDemandModel(DemandModel):
         return "quadratic"
 
     def _build_pymc_model(self, data: PricePanelData) -> pm.Model:
+        raise_if_iv_not_supported(data, model_name="QuadraticLogDemandModel")
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
 

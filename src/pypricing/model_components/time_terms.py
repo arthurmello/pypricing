@@ -127,6 +127,7 @@ def get_trend_term(
     *,
     trend: TrendKind | None,
     t0: pd.Timestamp | None,
+    param_suffix: str = "",
 ) -> Any:
     """Additive ``trend * t`` in log-quantity; ``t`` is years since ``t0``."""
     if trend is None:
@@ -137,16 +138,17 @@ def get_trend_term(
         raise ValueError("trend requires t0 (minimum training period)")
 
     t = pt.constant(period_to_t_years(data.period_index, t0))
+    basename = f"trend{param_suffix}"
     if trend == "shared":
         mu_trend = resolve_prior(
             model_config=model_config,
-            param_name="mu_trend",
+            param_name=f"mu_{basename}",
             default_dist=pm.Normal,
             default_kwargs={"mu": 0.0, "sigma": _TREND_PRIOR_SIGMA},
         )
         return mu_trend * t
 
-    trend_sku = _trend_sku_effect(model_config, data)
+    trend_sku = _trend_sku_effect(model_config, data, basename=basename)
     obs_sku = pt.constant(data.obs_sku_idx)
     return trend_sku[obs_sku] * t
 
@@ -156,6 +158,7 @@ def get_season_term(
     data: PricePanelData,
     *,
     components: tuple[str, ...] | None,
+    param_name: str = "beta_season",
 ) -> Any:
     """Shared Fourier seasonality: ``X_season @ beta_season``."""
     if not components:
@@ -168,7 +171,7 @@ def get_season_term(
         return 0.0
     beta = resolve_prior(
         model_config=model_config,
-        param_name="beta_season",
+        param_name=param_name,
         default_dist=pm.Normal,
         default_kwargs={"mu": 0.0, "sigma": _SEASON_PRIOR_SIGMA},
         shape=k,
@@ -179,10 +182,13 @@ def get_season_term(
 def _trend_sku_effect(
     model_config: dict[str, Any] | None,
     data: PricePanelData,
+    *,
+    basename: str = "trend",
 ) -> Any:
+    sku_name = f"{basename}_sku"
     if data.hierarchy is not None:
         lin = get_noncentered_hierarchical_effect_per_sku(
-            "trend",
+            basename,
             n_skus=data.n_skus,
             hierarchy=data.hierarchy,
             model_config=model_config,
@@ -191,25 +197,25 @@ def _trend_sku_effect(
             level_scale_default_sigma=_TREND_PRIOR_SIGMA,
             sku_scale_default_sigma=_TREND_PRIOR_SIGMA,
         )
-        return pm.Deterministic("trend_sku", lin, dims="sku")
+        return pm.Deterministic(sku_name, lin, dims="sku")
 
     mu_trend = resolve_prior(
         model_config=model_config,
-        param_name="mu_trend",
+        param_name=f"mu_{basename}",
         default_dist=pm.Normal,
         default_kwargs={"mu": 0.0, "sigma": _TREND_PRIOR_SIGMA},
     )
     sigma_sku = resolve_prior(
         model_config=model_config,
-        param_name="sigma_trend_sku",
+        param_name=f"sigma_{basename}_sku",
         default_dist=pm.HalfNormal,
         default_kwargs={"sigma": _TREND_PRIOR_SIGMA},
     )
     eta_sku = resolve_prior(
         model_config=model_config,
-        param_name="eta_trend_sku",
+        param_name=f"eta_{basename}_sku",
         default_dist=pm.Normal,
         default_kwargs={"mu": 0.0, "sigma": 1.0},
         dims="sku",
     )
-    return pm.Deterministic("trend_sku", mu_trend + sigma_sku * eta_sku, dims="sku")
+    return pm.Deterministic(sku_name, mu_trend + sigma_sku * eta_sku, dims="sku")
