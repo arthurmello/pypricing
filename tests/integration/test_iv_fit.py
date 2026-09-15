@@ -1,4 +1,4 @@
-"""Integration smoke: control-function IV on log-log."""
+"""Integration smoke: control-function IV on log-log and quadratic."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pypricing import (
 )
 
 
-def _endogenous_panel(*, seed: int = 0):
+def _endogenous_panel(*, seed: int = 0, shape: str = "log_log"):
     return generate_mock_data(
         n_periods=12,
         n_skus=3,
@@ -23,16 +23,23 @@ def _endogenous_panel(*, seed: int = 0):
         endogeneity=1.0,
         include_seasonality=False,
         round_quantity=False,
+        shape=shape,
         random_state=seed,
     )
 
 
 _IV_COLS = PanelColumns(quantity_floor=1e-12)
+_IV_MODELS = (LogLogDemandModel, QuadraticLogDemandModel)
 
 
-def test_log_log_iv_fit_predict_optimize():
-    df = _endogenous_panel()
-    model = LogLogDemandModel(panel_columns=_IV_COLS)
+def _shape_for(model_cls) -> str:
+    return "quadratic" if model_cls is QuadraticLogDemandModel else "log_log"
+
+
+@pytest.mark.parametrize("model_cls", _IV_MODELS)
+def test_iv_fit_predict_optimize(model_cls):
+    df = _endogenous_panel(shape=_shape_for(model_cls))
+    model = model_cls(panel_columns=_IV_COLS)
     model.fit(
         df,
         draws=50,
@@ -46,6 +53,8 @@ def test_log_log_iv_fit_predict_optimize():
     assert "rho" in model.idata.posterior
     assert "pi" in model.idata.posterior
     assert "obs_price" not in model.idata.posterior
+    if model_cls is QuadraticLogDemandModel:
+        assert "curvature_sku" in model.idata.posterior
 
     summary = model.fit_summary()
     assert "rho" in summary.index or any("rho" in str(i) for i in summary.index)
@@ -72,9 +81,10 @@ def test_log_log_iv_fit_predict_optimize():
     assert np.all(np.isfinite(opt["optimal_price"].to_numpy()))
 
 
-def test_log_log_iv_save_load_roundtrip(tmp_path):
-    df = _endogenous_panel(seed=1)
-    model = LogLogDemandModel(panel_columns=_IV_COLS)
+@pytest.mark.parametrize("model_cls", _IV_MODELS)
+def test_iv_save_load_roundtrip(model_cls, tmp_path):
+    df = _endogenous_panel(seed=1, shape=_shape_for(model_cls))
+    model = model_cls(panel_columns=_IV_COLS)
     model.fit(
         df,
         draws=40,
@@ -86,7 +96,7 @@ def test_log_log_iv_save_load_roundtrip(tmp_path):
     )
     path = tmp_path / "iv_model.nc"
     model.save(path)
-    loaded = LogLogDemandModel.load(path)
+    loaded = model_cls.load(path)
     assert loaded.iv_names_ == ("iv_1",)
 
     df_pred = df.drop(columns=["quantity"]).copy()
@@ -115,13 +125,9 @@ def test_iv_disabled_with_empty_tuple():
     assert "rho" not in model.idata.posterior
 
 
-@pytest.mark.parametrize(
-    "model_cls",
-    [QuadraticLogDemandModel, SigmoidSaturationDemandModel],
-)
-def test_iv_not_supported_on_nonlinear_curves(model_cls):
+def test_iv_not_supported_on_sigmoid():
     df = _endogenous_panel(seed=3)
-    model = model_cls(panel_columns=_IV_COLS)
+    model = SigmoidSaturationDemandModel(panel_columns=_IV_COLS)
     with pytest.raises(ValueError, match="not supported"):
         model.fit(
             df,

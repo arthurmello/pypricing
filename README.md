@@ -5,7 +5,7 @@ Bayesian own-price elasticity estimation with PyMC for long-format panels (one r
 This is currently an MVP for log-demand panels (per-SKU intercept + per-SKU elasticity) with:
 
 - optional **shared control** regressors (`control_`* columns)
-- optional **instrumental variables** (`iv_*` columns or `PanelColumns(iv_columns=...)`) on `LogLogDemandModel`
+- optional **instrumental variables** (`iv_*` columns or `PanelColumns(iv_columns=...)`) on `LogLogDemandModel` and `QuadraticLogDemandModel`
 - optional **hierarchical / partial pooling** across group columns
 - optional **linear time trend** (`trend="shared"` or `"sku"`)
 - optional **calendar seasonality** (`seasonality="yearly"` / `"weekly"` / `"auto"`)
@@ -94,7 +94,7 @@ _ = model.plot_response_curve(sku=sku0, price_grid=price_grid, controls=controls
   - `quantity` (configurable via `quantity_col`) — must be **non-negative**
 - **Optional**
   - `control_`* columns (or pass an explicit `control_columns=(...)` via `PanelColumns`) — must be numeric, no NaNs
-  - `iv_*` columns (or `iv_columns=(...)`) — instruments for control-function IV on `LogLogDemandModel`. Must be numeric, no NaNs. An empty `iv_columns=()` turns IV off even if `iv_*` columns exist.
+  - `iv_*` columns (or `iv_columns=(...)`) — instruments for control-function IV on `LogLogDemandModel` and `QuadraticLogDemandModel`. Must be numeric, no NaNs. An empty `iv_columns=()` turns IV off even if `iv_*` columns exist.
   - hierarchy columns (e.g. `category_1`, `category_2`) via `PanelColumns(group_columns=...)`
   - `period` (and often `region`) for `fit_train_test()` / cross-elasticity market cells.
     Integer or string keys are fine. **Datetime `period` is required** if you enable
@@ -209,7 +209,7 @@ If your frame contains `control_*` columns (or you pass `control_columns=(...)`)
 
 ### Instrumental variables (`iv_*`)
 
-Prices are often set using expected demand, so a regression of quantity on price mixes the demand slope with that feedback. On `LogLogDemandModel`, instrument columns identify elasticity from price variation that moves with \(Z\) but not with the demand error.
+Prices are often set using expected demand, so a regression of quantity on price mixes the demand slope with that feedback. On `LogLogDemandModel` and `QuadraticLogDemandModel`, instrument columns identify elasticity from price variation that moves with \(Z\) but not with the demand error.
 
 ```python
 from pypricing import LogLogDemandModel, PanelColumns, generate_mock_data
@@ -229,7 +229,7 @@ model.fit(df, draws=500, tune=500, chains=2, random_seed=0)
 print(model.run_diagnostics())  # rho, weak_iv
 ```
 
-What is fit (log-log only):
+What is fit (log-log; quadratic is the same idea with an extra \((\log P)^2\) term):
 
 - **Price:** \(\log P = \alpha^P_{\mathrm{sku}} + Z\pi + X\gamma^P + \text{trend/season} + v\)
 - **Demand:** \(\log Q = \alpha_{\mathrm{sku}} + \varepsilon_{\mathrm{sku}}\log P + X\beta + \rho v + \ldots\)
@@ -240,7 +240,7 @@ What is fit (log-log only):
 
 A valid instrument must move price without moving demand directly. Cost / commodity shocks usually qualify; lagged sales usually do not. The library cannot check the exclusion restriction.
 
-Quadratic and sigmoid models raise if instrument columns are present (`iv_columns=()` to ignore them).
+`SigmoidSaturationDemandModel` raises if instrument columns are present (`iv_columns=()` to ignore them).
 
 ### Priors and customization (`model_config`)
 
@@ -382,7 +382,7 @@ Omit `cross_elasticity` for own-price only. Use `mode="all"` for every directed 
 
 - Cold-start prediction for unseen SKUs
 - Joint / cross-aware price optimization (use counterfactual prediction on a full market cell instead)
-- Control-function IV on quadratic or sigmoid demand curves
+- Control-function IV on sigmoid demand curves
 
 ## Documentation
 

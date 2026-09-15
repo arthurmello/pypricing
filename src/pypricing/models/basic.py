@@ -63,7 +63,7 @@ class DemandModel(ModelBuilder):
         Column names and panel knobs (SKU / price / quantity, controls,
         instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
         ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
-        IV on :class:`LogLogDemandModel` only.
+        IV on :class:`LogLogDemandModel` and :class:`QuadraticLogDemandModel`.
     cross_elasticity
         If set, add directed cross-price effects (``CrossElasticitySpec``). Requires
         a balanced market cell per ``period`` (and ``region`` when used).

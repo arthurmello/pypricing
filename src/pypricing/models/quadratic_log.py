@@ -11,7 +11,7 @@ from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
-from pypricing.model_components.iv_terms import raise_if_iv_not_supported
+from pypricing.model_components.iv_terms import get_control_function_term
 
 
 class QuadraticLogDemandModel(DemandModel):
@@ -24,6 +24,10 @@ class QuadraticLogDemandModel(DemandModel):
     Reparameterized so ``elasticity_sku`` equals local elasticity at the per-SKU
     training median log-price (``log_price_midpoint_sku_``). Use when elasticity
     should change with price level (premium vs discount regimes).
+
+    Optional control-function IV: same first-stage residual as
+    ``LogLogDemandModel``. Estimation uses it; ``predict`` / ``optimize_prices``
+    use the structural curve (residual 0).
     """
 
     @property
@@ -31,7 +35,6 @@ class QuadraticLogDemandModel(DemandModel):
         return "quadratic"
 
     def _build_pymc_model(self, data: PricePanelData) -> pm.Model:
-        raise_if_iv_not_supported(data, model_name="QuadraticLogDemandModel")
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
 
@@ -75,6 +78,13 @@ class QuadraticLogDemandModel(DemandModel):
             season_term = get_season_term(
                 self.model_config, data, components=self.seasonality_
             )
+            control_function_term = get_control_function_term(
+                self.model_config,
+                data,
+                trend=self.trend,
+                t0=self.t0_,
+                seasonality_components=self.seasonality_,
+            )
 
             beta1_sku = elasticity_sku - 2.0 * curvature_sku * log_p_mid_sku
 
@@ -86,6 +96,7 @@ class QuadraticLogDemandModel(DemandModel):
                 + self._cross_term(data)
                 + trend_term
                 + season_term
+                + control_function_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model

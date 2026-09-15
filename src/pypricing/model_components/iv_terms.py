@@ -1,4 +1,4 @@
-"""Control-function IV terms for log-log demand."""
+"""Control-function IV terms for log-log and quadratic demand."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def raise_if_iv_not_supported(data: PricePanelData, *, model_name: str) -> None:
     if data.n_iv:
         raise ValueError(
             f"Instrumental variables (iv_columns) are not supported on {model_name}. "
-            "Use LogLogDemandModel for control-function IV."
+            "Use LogLogDemandModel or QuadraticLogDemandModel for control-function IV."
         )
 
 
