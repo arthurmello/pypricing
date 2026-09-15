@@ -1,4 +1,4 @@
-"""Control-function IV terms for log-log and quadratic demand."""
+"""Control-function IV terms for log-demand models."""
 
 from __future__ import annotations
 
@@ -16,14 +16,6 @@ from pypricing.model_components.time_terms import (
     get_season_term,
     get_trend_term,
 )
-
-
-def raise_if_iv_not_supported(data: PricePanelData, *, model_name: str) -> None:
-    if data.n_iv:
-        raise ValueError(
-            f"Instrumental variables (iv_columns) are not supported on {model_name}. "
-            "Use LogLogDemandModel or QuadraticLogDemandModel for control-function IV."
-        )
 
 
 def get_control_function_term(

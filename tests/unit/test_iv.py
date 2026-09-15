@@ -12,9 +12,15 @@ from pypricing import (
     generate_mock_data,
 )
 
+_IV_MODELS = (
+    (LogLogDemandModel, "log_log"),
+    (QuadraticLogDemandModel, "quadratic"),
+    (SigmoidSaturationDemandModel, "sigmoid"),
+)
 
-@pytest.mark.parametrize("model_cls", [LogLogDemandModel, QuadraticLogDemandModel])
-def test_iv_graph_has_price_equation(model_cls):
+
+@pytest.mark.parametrize("model_cls, shape", _IV_MODELS)
+def test_iv_graph_has_price_equation(model_cls, shape):
     df = generate_mock_data(
         n_periods=8,
         n_skus=2,
@@ -22,7 +28,7 @@ def test_iv_graph_has_price_equation(model_cls):
         include_seasonality=False,
         round_quantity=False,
         random_state=0,
-        shape="log_log" if model_cls is LogLogDemandModel else "quadratic",
+        shape=shape,
     )
     model = model_cls(panel_columns=PanelColumns(quantity_floor=1e-12))
     model.build_model(df)
@@ -34,18 +40,3 @@ def test_iv_graph_has_price_equation(model_cls):
     assert "obs" in observed
     assert "obs_price" in observed
     assert model.iv_names_ == ("iv_1",)
-
-
-def test_sigmoid_iv_raises_before_sampling():
-    df = generate_mock_data(
-        n_periods=6,
-        n_skus=2,
-        n_instruments=1,
-        include_seasonality=False,
-        round_quantity=False,
-        random_state=0,
-    )
-    with pytest.raises(ValueError, match="not supported"):
-        SigmoidSaturationDemandModel(
-            panel_columns=PanelColumns(quantity_floor=1e-12)
-        ).build_model(df)
