@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import warnings
 from abc import abstractmethod
 from importlib.metadata import PackageNotFoundError, version as pkg_version
-from typing import Any, Iterable, Literal
+from pathlib import Path
+from typing import Any, Iterable, Literal, Self
 
 import arviz as az
 import numpy as np
@@ -12,7 +14,6 @@ import pandas as pd
 import pymc as pm
 import xarray as xr
 import pytensor.tensor as pt
-from pymc_marketing.model_builder import ModelBuilder
 
 from pypricing.model_components.cross_elasticity import (
     CrossElasticitySpec,
@@ -29,7 +30,33 @@ except PackageNotFoundError:  # pragma: no cover
     _PKG_VERSION = "0.0.1"
 
 
-class DemandModel(ModelBuilder):
+class DifferentModelError(Exception):
+    """Loaded InferenceData does not match this model class or configuration."""
+
+
+def _json_default(obj: Any) -> Any:
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    if hasattr(obj, "__dict__"):
+        return {
+            key: value
+            for key, value in obj.__dict__.items()
+            if not callable(value) and not key.startswith("_")
+        }
+    return str(obj)
+
+
+def _read_netcdf(path: str | Path) -> az.InferenceData:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=UserWarning,
+            message=r"fit_data group is not defined in the InferenceData scheme",
+        )
+        return az.from_netcdf(path)
+
+
+class DemandModel:
     """Base class for Bayesian log-demand models on long-format price panels.
 
     Subclasses define the own-price mean curve; this base handles fit/predict,
@@ -69,7 +96,9 @@ class DemandModel(ModelBuilder):
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(model_config=model_config, sampler_config=sampler_config)
+        self.model_config = self.default_model_config | (model_config or {})
+        self.sampler_config = self.default_sampler_config | (sampler_config or {})
+        self.idata: az.InferenceData | None = None
         self.panel_columns = panel_columns or PanelColumns()
         self.cross_elasticity = cross_elasticity
         self.sku_levels_: pd.Index | None = None
@@ -149,37 +178,81 @@ class DemandModel(ModelBuilder):
     def _serializable_model_config(self) -> dict:
         return self.model_config
 
+    @property
+    def id(self) -> str:
+        hasher = hashlib.sha256()
+        config_json = json.dumps(
+            self._serializable_model_config,
+            sort_keys=True,
+            default=_json_default,
+        )
+        hasher.update(config_json.encode())
+        hasher.update(self.version.encode())
+        hasher.update(self._model_type.encode())
+        return hasher.hexdigest()[:16]
+
     def create_idata_attrs(self) -> dict[str, str]:
-        attrs = super().create_idata_attrs()
         cols = self.panel_columns
         ce = self.cross_elasticity
-        attrs.update(
-            {
-                "panel_columns": json.dumps(
-                    {
-                        "sku_col": cols.sku_col,
-                        "price_col": cols.price_col,
-                        "quantity_col": cols.quantity_col,
-                        "quantity_floor": cols.quantity_floor,
-                        "control_columns": cols.control_columns,
-                        "group_columns": cols.group_columns,
-                        "period_col": cols.period_col,
-                        "region_col": cols.region_col,
-                        "floor_censoring_warn_threshold": cols.floor_censoring_warn_threshold,
-                    }
-                ),
-                "cross_elasticity": json.dumps(
-                    None
-                    if ce is None
-                    else {"mode": ce.mode, "group_level": ce.group_level}
-                ),
-            }
-        )
-        return attrs
+        return {
+            "id": self.id,
+            "model_type": self._model_type,
+            "version": self.version,
+            "sampler_config": json.dumps(self.sampler_config, default=_json_default),
+            "model_config": json.dumps(
+                self._serializable_model_config, default=_json_default
+            ),
+            "panel_columns": json.dumps(
+                {
+                    "sku_col": cols.sku_col,
+                    "price_col": cols.price_col,
+                    "quantity_col": cols.quantity_col,
+                    "quantity_floor": cols.quantity_floor,
+                    "control_columns": cols.control_columns,
+                    "group_columns": cols.group_columns,
+                    "period_col": cols.period_col,
+                    "region_col": cols.region_col,
+                    "floor_censoring_warn_threshold": cols.floor_censoring_warn_threshold,
+                }
+            ),
+            "cross_elasticity": json.dumps(
+                None
+                if ce is None
+                else {"mode": ce.mode, "group_level": ce.group_level}
+            ),
+        }
+
+    def set_idata_attrs(
+        self, idata: az.InferenceData | None = None
+    ) -> az.InferenceData:
+        if idata is None:
+            idata = self.idata
+        if idata is None:
+            raise RuntimeError("No idata provided to set attrs on.")
+        idata.attrs = self.create_idata_attrs()
+        return idata
+
+    def save(self, fname: str, **kwargs: Any) -> None:
+        if self.idata is None or "posterior" not in self.idata:
+            raise RuntimeError("The model hasn't been fit yet, call .fit() first")
+        self.idata.to_netcdf(str(Path(fname)), **kwargs)
+
+    @classmethod
+    def _model_config_formatting(cls, model_config: dict) -> dict:
+        for value in model_config.values():
+            if not isinstance(value, dict):
+                continue
+            for sub_key, sub_value in value.items():
+                if not isinstance(sub_value, list):
+                    continue
+                if sub_key == "dims":
+                    value[sub_key] = tuple(sub_value)
+                else:
+                    value[sub_key] = np.array(sub_value)
+        return model_config
 
     @classmethod
     def attrs_to_init_kwargs(cls, attrs) -> dict[str, Any]:
-        kwargs = super().attrs_to_init_kwargs(attrs)
         ce_raw = json.loads(attrs["cross_elasticity"])
         cross_elasticity = (
             None
@@ -189,31 +262,60 @@ class DemandModel(ModelBuilder):
                 group_level=ce_raw.get("group_level"),
             )
         )
-
         pc = json.loads(attrs["panel_columns"])
         control_raw = pc.get("control_columns")
         group_raw = pc.get("group_columns")
-        panel_columns = PanelColumns(
-            sku_col=pc["sku_col"],
-            price_col=pc["price_col"],
-            quantity_col=pc["quantity_col"],
-            quantity_floor=float(pc["quantity_floor"]),
-            control_columns=tuple(control_raw) if control_raw is not None else None,
-            group_columns=tuple(group_raw) if group_raw is not None else None,
-            period_col=pc.get("period_col", "period"),
-            region_col=pc.get("region_col"),
-            floor_censoring_warn_threshold=pc.get(
-                "floor_censoring_warn_threshold", 0.5
+        return {
+            "model_config": cls._model_config_formatting(
+                json.loads(attrs["model_config"])
             ),
-        )
+            "sampler_config": json.loads(attrs["sampler_config"]),
+            "panel_columns": PanelColumns(
+                sku_col=pc["sku_col"],
+                price_col=pc["price_col"],
+                quantity_col=pc["quantity_col"],
+                quantity_floor=float(pc["quantity_floor"]),
+                control_columns=tuple(control_raw) if control_raw is not None else None,
+                group_columns=tuple(group_raw) if group_raw is not None else None,
+                period_col=pc.get("period_col", "period"),
+                region_col=pc.get("region_col"),
+                floor_censoring_warn_threshold=pc.get(
+                    "floor_censoring_warn_threshold", 0.5
+                ),
+            ),
+            "cross_elasticity": cross_elasticity,
+        }
 
-        kwargs.update(
-            {
-                "panel_columns": panel_columns,
-                "cross_elasticity": cross_elasticity,
-            }
-        )
-        return kwargs
+    @classmethod
+    def load(cls, fname: str, check: bool = True) -> Self:
+        idata = _read_netcdf(fname)
+        try:
+            return cls.load_from_idata(idata, check=check)
+        except DifferentModelError as exc:
+            raise DifferentModelError(
+                f"The file {fname!r} does not contain InferenceData for "
+                f"{cls._model_type!r}"
+            ) from exc
+
+    @classmethod
+    def load_from_idata(
+        cls, idata: az.InferenceData, check: bool = True
+    ) -> Self:
+        model = cls(**cls.attrs_to_init_kwargs(idata.attrs))
+        model.idata = idata
+        model.build_from_idata(idata)
+        if not check:
+            return model
+        if model.version != idata.attrs["version"]:
+            raise DifferentModelError(
+                f"The model version ({idata.attrs['version']}) in the "
+                f"InferenceData does not match ({model.version})."
+            )
+        if model.id != idata.attrs["id"]:
+            raise DifferentModelError(
+                "The model id in the InferenceData does not match the model id."
+            )
+        return model
 
     def _add_fit_data_group(self, data: pd.DataFrame) -> None:
         fit_data = data.to_xarray()
