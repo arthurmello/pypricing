@@ -550,7 +550,7 @@ def generate_mock_data(
     shape: str = "log_log",
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
-    include_seasonality: bool = True,
+    include_seasonality: bool = False,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -576,7 +576,7 @@ def generate_mock_data(
     shape: str = "log_log",
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
-    include_seasonality: bool = True,
+    include_seasonality: bool = False,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -601,7 +601,7 @@ def generate_mock_data(
     shape: str = "log_log",
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
-    include_seasonality: bool = True,
+    include_seasonality: bool = False,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -674,11 +674,11 @@ def generate_mock_data(
     cross_elasticity_group_level
         Required for ``\"within_group\"``: index into the hierarchy (``0`` = coarsest).
     include_seasonality
-        If ``True`` (default), add a sinusoidal term to mean log-quantity.
-        With ``start_date``, this is a yearly sine on day-of-year (matches
-        ``seasonality="yearly"``). Without ``start_date``, it is a sine over
-        integer ``0 … n_periods-1`` that the model cannot fit as Fourier —
-        pass ``False`` unless you are using a dated panel.
+        If ``True``, add a sinusoidal term to mean log-quantity. Default
+        ``False``. With ``start_date``, this is a yearly sine on day-of-year
+        (matches ``seasonality="yearly"``). Without ``start_date``, it is a
+        sine over integer ``0 … n_periods-1`` that the model cannot fit as
+        Fourier.
     price_shock_sigma
         Std of per-period log-price innovations in the random walk (default ``0.03``).
         Larger values improve elasticity identification.
