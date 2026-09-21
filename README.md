@@ -53,11 +53,3 @@ print(model.predict(df_scenario, hdi_prob=0.9, random_seed=123).head())
 
 Column names are configurable via `PanelColumns`. Internally the model uses
 `log(price)` and `log(max(quantity, quantity_floor))` (default floor `1.0`).
-
-## When this is not identified
-
-If prices respond to the same shocks that move demand, a regression of quantity
-on price mixes the demand slope with that feedback. More regressors do not fix
-it. You need exogenous price variation: a randomized experiment, cost /
-commodity shocks, or other valid instruments (`iv_*`). See
-[Identification](https://pypricing.readthedocs.io/en/latest/identification.html).
