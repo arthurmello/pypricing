@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
@@ -16,6 +17,47 @@ from pypricing.model_components.time_terms import (
     get_season_term,
     get_trend_term,
 )
+
+# Rule of thumb for one endogenous regressor (Staiger and Stock).
+WEAK_IV_F_THRESHOLD = 10.0
+
+
+def _ssr_and_rank(y: np.ndarray, X: np.ndarray) -> tuple[float, int]:
+    coef, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ coef
+    return float(resid @ resid), int(rank)
+
+
+def first_stage_partial_f(
+    log_price: np.ndarray,
+    instruments: np.ndarray,
+    exogenous: np.ndarray,
+) -> float:
+    """Partial F for excluded instruments in a linear price equation.
+
+    ``exogenous`` is partialled out first (SKU intercepts, controls, trend,
+    seasonality). The statistic is the homoskedastic F for the joint hypothesis
+    that every instrument coefficient is zero. Instruments with no remaining
+    variation return ``0``.
+    """
+    y = np.asarray(log_price, dtype=np.float64).reshape(-1)
+    Z = np.asarray(instruments, dtype=np.float64)
+    if Z.ndim == 1:
+        Z = Z.reshape(-1, 1)
+    X = np.asarray(exogenous, dtype=np.float64)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    n = y.shape[0]
+    if X.size == 0 or X.shape[1] == 0:
+        X = np.ones((n, 1), dtype=np.float64)
+    ssr_r, rank_r = _ssr_and_rank(y, X)
+    ssr_u, rank_u = _ssr_and_rank(y, np.column_stack([X, Z]))
+    df_num = rank_u - rank_r
+    df_den = n - rank_u
+    if df_num <= 0 or df_den <= 0:
+        return 0.0
+    gap = max(ssr_r - ssr_u, 0.0)
+    return (gap / df_num) / (ssr_u / df_den)
 
 
 def get_control_function_term(

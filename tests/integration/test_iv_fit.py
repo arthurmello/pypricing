@@ -61,7 +61,9 @@ def test_iv_fit_predict_optimize(model_cls, shape):
 
     diag = model.run_diagnostics()
     assert "rho_mean" in diag
-    assert "weak_iv" in diag
+    assert "first_stage_f" in diag
+    assert np.isfinite(diag["first_stage_f"])
+    assert diag["weak_iv"] == (diag["first_stage_f"] < 10.0)
 
     df_pred = df.drop(columns=["quantity"]).copy()
     out = model.predict(df_pred, hdi_prob=0.9, random_seed=123)

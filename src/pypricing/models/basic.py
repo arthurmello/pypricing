@@ -573,8 +573,35 @@ class DemandModel:
         out.update(self._iv_diagnostics())
         return out
 
+    def _first_stage_exogenous(self) -> np.ndarray:
+        """Regressors partialled out of the price equation before the instrument F."""
+        assert self.data is not None and self.sku_levels_ is not None
+        sku = pd.Categorical(self.data[self.sku_col], categories=self.sku_levels_)
+        dummies = pd.get_dummies(sku).to_numpy(dtype=np.float64)
+        parts: list[np.ndarray] = [dummies]
+        if self.control_names_:
+            controls = self.data.loc[:, list(self.control_names_)].to_numpy(
+                dtype=np.float64
+            )
+            parts.append(controls)
+        if self.trend is not None:
+            t = self._t_years_for_frame(self.data).reshape(-1, 1)
+            if self.trend == "sku":
+                parts.append(dummies * t)
+            else:
+                parts.append(t)
+        season = self._season_features_for_frame(self.data)
+        if season is not None and season.size:
+            parts.append(season)
+        return np.column_stack(parts)
+
     def _iv_diagnostics(self, *, hdi_prob: float = 0.9) -> dict[str, Any]:
-        """Weak-IV and endogeneity flags from the control-function posterior."""
+        """Endogeneity interval for ``rho`` and the first-stage partial F."""
+        from pypricing.model_components.iv_terms import (
+            WEAK_IV_F_THRESHOLD,
+            first_stage_partial_f,
+        )
+
         assert self.idata is not None
         post = self.idata.posterior
         if "rho" not in post and "pi" not in post:
@@ -588,21 +615,20 @@ class DemandModel:
             lo, hi = np.quantile(rho, [alpha, 1.0 - alpha])
             out["rho_hdi"] = (float(lo), float(hi))
             out["rho_hdi_includes_zero"] = bool(lo <= 0.0 <= hi)
-        if "pi" in post:
-            pi = np.asarray(post["pi"].values, dtype=np.float64)
-            if pi.ndim == 2:
-                pi = pi[:, :, None]
-            flat = pi.reshape(-1, pi.shape[-1])
-            lo = np.quantile(flat, alpha, axis=0)
-            hi = np.quantile(flat, 1.0 - alpha, axis=0)
-            includes_zero = (lo <= 0.0) & (hi >= 0.0)
-            names = list(self.iv_names_) or [
-                f"pi[{i}]" for i in range(flat.shape[1])
-            ]
-            out["weak_iv_instruments"] = [
-                names[i] for i in range(len(includes_zero)) if bool(includes_zero[i])
-            ]
-            out["weak_iv"] = bool(np.all(includes_zero))
+        if self.iv_names_ and self.data is not None:
+            instruments = self.data.loc[:, list(self.iv_names_)].to_numpy(
+                dtype=np.float64
+            )
+            log_price = np.log(
+                self.data[self.price_col].to_numpy(dtype=np.float64)
+            )
+            f_stat = first_stage_partial_f(
+                log_price,
+                instruments,
+                self._first_stage_exogenous(),
+            )
+            out["first_stage_f"] = f_stat
+            out["weak_iv"] = bool(f_stat < WEAK_IV_F_THRESHOLD)
         return out
 
     def graphviz(self):
