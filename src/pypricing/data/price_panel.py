@@ -94,7 +94,7 @@ class PanelColumns:
     quantity_floor: float = 1.0
     control_columns: tuple[str, ...] | None = None
     iv_columns: tuple[str, ...] | None = None
-    """Instrument columns for control-function IV (``LogLogDemandModel`` only).
+    """Instrument columns for control-function IV on the log-demand models.
 
     ``None`` (default) auto-detects columns named ``iv_*``. An empty tuple
     disables IV even if such columns exist.
