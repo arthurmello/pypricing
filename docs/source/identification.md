@@ -40,7 +40,6 @@ df = generate_mock_data(
     n_instruments=1,      # writes iv_1
     endogeneity=1.0,      # demand shock also moves price
     include_seasonality=False,
-    round_quantity=False,
     random_state=0,
 )
 model = LogLogDemandModel()  # auto-detects iv_*

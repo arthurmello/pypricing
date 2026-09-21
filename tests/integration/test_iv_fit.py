@@ -29,7 +29,6 @@ def _endogenous_panel(*, seed: int = 0, shape: str = "log_log"):
         n_instruments=1,
         endogeneity=1.0,
         include_seasonality=False,
-        round_quantity=False,
         shape=shape,
         random_state=seed,
     )

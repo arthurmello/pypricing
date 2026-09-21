@@ -14,7 +14,6 @@ df = generate_mock_data(
     freq="W",
     include_seasonality=True,  # yearly sine on day-of-year
     volume_trend=0.08,         # shared annual log-growth; needs start_date
-    round_quantity=False,
     random_state=0,
 )
 model = LogLogDemandModel(trend="shared", seasonality="auto")

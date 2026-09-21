@@ -68,6 +68,8 @@ def test_demand_shape_smoke(shape):
     )
     assert len(df) == 12
     assert df["quantity"].gt(0).all()
+    assert np.issubdtype(df["quantity"].dtype, np.floating)
+    assert np.allclose(df["log_quantity"], np.log(df["quantity"]))
 
 
 def test_demand_shape_invalid():
@@ -144,21 +146,6 @@ def test_return_truth_quadratic_has_curvature():
     assert truth.curvature_sku.shape == (2,)
 
 
-def test_round_quantity_false_keeps_continuous_qty():
-    df, _truth = generate_mock_data(
-        n_periods=8,
-        n_skus=3,
-        random_state=11,
-        shape="log_log",
-        include_seasonality=False,
-        round_quantity=False,
-        return_truth=True,
-    )
-    assert np.issubdtype(df["quantity"].dtype, np.floating)
-    # Seed 11 previously floored sku_1 to qty==1 under integer rounding.
-    assert df.loc[df["sku"] == "sku_1", "log_quantity"].std() > 0.05
-
-
 def test_include_seasonality_flag():
     df_on = generate_mock_data(
         n_periods=20, n_skus=2, random_state=0, include_seasonality=True
@@ -183,7 +170,6 @@ def test_volume_trend_changes_quantity():
         random_state=0,
         start_date="2020-01-06",
         include_seasonality=False,
-        round_quantity=False,
     )
     df0, truth0 = generate_mock_data(**kwargs, volume_trend=0.0, return_truth=True)
     df1, truth1 = generate_mock_data(**kwargs, volume_trend=0.2, return_truth=True)
@@ -214,7 +200,6 @@ def test_endogeneity_changes_price():
         n_instruments=1,
         random_state=0,
         include_seasonality=False,
-        round_quantity=False,
         price_shock_sigma=0.02,
     )
     df0 = generate_mock_data(**kwargs, endogeneity=0.0)
@@ -234,7 +219,6 @@ def test_sigmoid_truth_elasticity_is_elasticity_at_center():
         n_skus=2,
         noise_sigma=noise_sigma,
         include_seasonality=False,
-        round_quantity=False,
         shape="sigmoid",
         random_state=0,
         return_truth=True,
@@ -261,7 +245,6 @@ def test_regions_share_one_sku_intercept_and_curve():
         n_regions=2,
         noise_sigma=noise_sigma,
         include_seasonality=False,
-        round_quantity=False,
         shape="log_log",
         random_state=0,
         return_truth=True,
@@ -281,7 +264,6 @@ def test_regions_share_one_sku_intercept_and_curve():
         n_regions=2,
         noise_sigma=noise_sigma,
         include_seasonality=False,
-        round_quantity=False,
         shape="quadratic",
         random_state=1,
         return_truth=True,
@@ -312,7 +294,6 @@ def test_control_coefs_are_shared_across_skus():
         n_controls=2,
         noise_sigma=noise_sigma,
         include_seasonality=False,
-        round_quantity=False,
         random_state=0,
         return_truth=True,
     )
@@ -344,7 +325,6 @@ def test_cross_prices_use_observed_log_prices():
         noise_sigma=noise_sigma,
         cross_elasticity="all",
         include_seasonality=False,
-        round_quantity=False,
         random_state=0,
         shape="log_log",
         return_truth=True,

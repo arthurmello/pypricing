@@ -29,7 +29,6 @@ def _endogenous_panel(*, seed: int):
         noise_sigma=0.25,
         price_shock_sigma=0.01,
         include_seasonality=False,
-        round_quantity=False,
         shape="quadratic",
         random_state=seed,
         return_truth=True,

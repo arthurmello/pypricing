@@ -79,7 +79,6 @@ class _PanelSim:
     period_season: np.ndarray
     annual_phase: np.ndarray
     include_seasonality: bool
-    round_quantity: bool
     volume_trend: float
     n_instruments: int
     instrument_coef: float
@@ -380,12 +379,11 @@ def _mean_log_quantity(
 def _draw_observed_log_prices(
     rng: np.random.Generator,
     sim: _PanelSim,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
-    """Log prices after instruments and endogeneity, plus the shocks that built them.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """Observed prices after instruments and endogeneity, plus the shocks behind them.
 
     Drawn in the same SKU–region order as the quantity loop so a fixed seed keeps
-    the same shocks. Cross-price terms must use these log prices, not the
-    pre-shock random walk.
+    the same shocks. Cross-price terms use these log prices.
     """
     n_skus = sim.n_skus
     n_reg = sim.n_reg
@@ -419,7 +417,13 @@ def _draw_observed_log_prices(
                 controls_panel[s, r] = rng.normal(size=(n_periods, sim.n_controls))
             log_price_obs[s, r] = log_price
             demand_shocks[s, r] = demand_shock
-    return log_price_obs, demand_shocks, controls_panel, instruments_panel
+    return (
+        log_price_obs,
+        np.exp(log_price_obs),
+        demand_shocks,
+        controls_panel,
+        instruments_panel,
+    )
 
 
 def _simulate_panel_rows(
@@ -429,7 +433,7 @@ def _simulate_panel_rows(
     rows: list[dict] = []
     beta_season = _PANEL_SEASON_BETA
     hierarchy = sim.effects.hierarchy
-    log_price_obs, demand_shocks, controls_panel, instruments_panel = (
+    log_price_obs, price_obs, demand_shocks, controls_panel, instruments_panel = (
         _draw_observed_log_prices(rng, sim)
     )
     sku_log_p_mid = np.median(log_price_obs, axis=(1, 2))
@@ -437,8 +441,8 @@ def _simulate_panel_rows(
     for s in range(sim.n_skus):
         for r in range(sim.n_reg):
             log_price = log_price_obs[s, r]
+            price = price_obs[s, r]
             demand_shock = demand_shocks[s, r]
-            price = np.exp(log_price)
             instruments = None if instruments_panel is None else instruments_panel[s, r]
 
             season = (
@@ -500,29 +504,16 @@ def _simulate_panel_rows(
                             cross_sum += g * log_price_obs[j, r, t]
                     mean_log_q[t] += cross_sum
 
-            if sim.round_quantity:
-                quantity = np.exp(mean_log_q).astype(int).clip(1)
-                log_q = np.log(np.maximum(quantity.astype(np.float64), 1.0))
-                price_out = np.round(price, 2)
-                log_p_out = np.round(log_price, 4)
-                log_q_out = np.round(log_q, 4)
-            else:
-                # Continuous / full-precision panel for recovery (model uses log(price)).
-                quantity = np.exp(mean_log_q)
-                log_q = mean_log_q
-                price_out = price
-                log_p_out = log_price
-                log_q_out = log_q
+            quantity = np.exp(mean_log_q)
 
             for t in range(sim.n_periods):
-                q_t = float(quantity[t])
                 row: dict = {
                     "sku": f"sku_{s + 1}",
                     "period": sim.date_index[t] if sim.date_index is not None else t,
-                    "price": float(price_out[t]),
-                    "quantity": int(q_t) if sim.round_quantity else q_t,
-                    "log_price": float(log_p_out[t]),
-                    "log_quantity": float(log_q_out[t]),
+                    "price": float(price[t]),
+                    "quantity": float(quantity[t]),
+                    "log_price": float(log_price[t]),
+                    "log_quantity": float(mean_log_q[t]),
                 }
                 if hierarchy is not None:
                     for L in range(hierarchy.n_levels):
@@ -535,11 +526,10 @@ def _simulate_panel_rows(
                     row["region"] = sim.region_labels[r]
                 if controls is not None:
                     for k in range(sim.n_controls):
-                        row[f"control_{k + 1}"] = round(float(controls[t, k]), 4)
+                        row[f"control_{k + 1}"] = float(controls[t, k])
                 if instruments is not None:
                     for k in range(sim.n_instruments):
-                        z = float(instruments[t, k])
-                        row[f"iv_{k + 1}"] = round(z, 4) if sim.round_quantity else z
+                        row[f"iv_{k + 1}"] = float(instruments[t, k])
                 rows.append(row)
 
     return rows
@@ -561,7 +551,6 @@ def generate_mock_data(
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
     include_seasonality: bool = True,
-    round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -588,7 +577,6 @@ def generate_mock_data(
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
     include_seasonality: bool = True,
-    round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -614,7 +602,6 @@ def generate_mock_data(
     cross_elasticity: str | None = None,
     cross_elasticity_group_level: int | None = None,
     include_seasonality: bool = True,
-    round_quantity: bool = True,
     price_shock_sigma: float = 0.03,
     volume_trend: float = 0.0,
     n_instruments: int = 0,
@@ -629,7 +616,7 @@ def generate_mock_data(
     There are ``n_periods * n_skus`` rows when ``n_regions`` is omitted, or
     ``n_periods * n_skus * n_regions`` when regions are included (full factorial).
 
-    Mean ``log_quantity`` (before integer rounding) follows one of:
+    Mean ``log_quantity`` follows one of:
 
     * ``"log_log"`` — ``LogLogDemandModel``: ``log Q ≈ α + ε log P + …``
     * ``"quadratic"`` — ``QuadraticLogDemandModel``: ``log Q ≈ α + β₁ log P + κ (log P)² + …``
@@ -692,9 +679,6 @@ def generate_mock_data(
         ``seasonality="yearly"``). Without ``start_date``, it is a sine over
         integer ``0 … n_periods-1`` that the model cannot fit as Fourier —
         pass ``False`` unless you are using a dated panel.
-    round_quantity
-        If ``True`` (default), store integer quantities (clipped at 1). Set ``False``
-        to keep continuous quantity / ``log_quantity`` (useful for recovery tests).
     price_shock_sigma
         Std of per-period log-price innovations in the random walk (default ``0.03``).
         Larger values improve elasticity identification.
@@ -816,7 +800,6 @@ def generate_mock_data(
             period_season=period_season,
             annual_phase=annual_phase,
             include_seasonality=include_seasonality,
-            round_quantity=round_quantity,
             volume_trend=float(volume_trend),
             n_instruments=int(n_instruments),
             instrument_coef=float(instrument_coef),

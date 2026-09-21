@@ -31,7 +31,6 @@ def _recovery_panel(*, n_periods: int, n_skus: int, seed: int):
         random_state=seed,
         shape="log_log",
         include_seasonality=False,
-        round_quantity=False,
         price_shock_sigma=0.08,
         return_truth=True,
     )

@@ -26,7 +26,6 @@ def test_iv_graph_has_price_equation(model_cls, shape):
         n_skus=2,
         n_instruments=1,
         include_seasonality=False,
-        round_quantity=False,
         random_state=0,
         shape=shape,
     )

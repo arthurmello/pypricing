@@ -227,7 +227,6 @@ def test_seasonality_requires_period_column():
         random_state=0,
         start_date="2020-01-06",
         include_seasonality=False,
-        round_quantity=False,
     ).drop(columns=["period"])
     with pytest.raises(ValueError, match="Missing period column"):
         LogLogDemandModel(seasonality="yearly").build_model(df)
@@ -240,7 +239,6 @@ def test_seasonality_only_counterfactual_period():
         random_state=0,
         start_date="2020-01-06",
         include_seasonality=False,
-        round_quantity=False,
     )
     model = LogLogDemandModel(seasonality="yearly")
     model.build_model(df)
@@ -262,7 +260,6 @@ def _mock_panel(*, freq: str, n_periods: int, start_date: str) -> pd.DataFrame:
         start_date=start_date,
         freq=freq,
         include_seasonality=False,
-        round_quantity=False,
     )
 
 

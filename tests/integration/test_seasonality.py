@@ -25,7 +25,6 @@ def _weekly_panel(**kwargs):
         start_date="2020-01-06",
         freq="W",
         include_seasonality=True,
-        round_quantity=False,
     )
     defaults.update(kwargs)
     return generate_mock_data(**defaults)
@@ -50,7 +49,6 @@ def test_fit_weekly_and_yearly_smoke():
         start_date="2020-01-01",
         freq="D",
         include_seasonality=True,
-        round_quantity=False,
     )
     model = LogLogDemandModel(seasonality=("yearly", "weekly"))
     model.fit(df, **_SMOKE)
