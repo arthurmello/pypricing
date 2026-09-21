@@ -628,6 +628,7 @@ def plot_optimization_summary(
     *,
     reference_prices: Mapping[Any, float] | pd.Series | None = None,
     controls_df: pd.DataFrame | None = None,
+    at_period: Any = None,
     include_revenue_comparison: bool = True,
     ax=None,
 ) -> tuple[Any, Any | None]:
@@ -635,9 +636,9 @@ def plot_optimization_summary(
     Visual summary of :func:`~pypricing.optimizer.optimize_prices` output.
 
     Top panel: grouped bars of reference price vs ``optimal_price`` per SKU.
-    Bottom panel (unless ``ax`` is passed): grouped bars of posterior **mean**
-    revenue at the reference price vs at the optimal price (same definition as
-    ``mean_revenue`` in the optimizer output).
+    Bottom panel (unless ``ax`` is passed): grouped bars of posterior mean
+    expected revenue at the reference price vs at the optimal price (same
+    definition as ``mean_revenue`` in the optimizer output).
 
     Parameters
     ----------
@@ -652,6 +653,9 @@ def plot_optimization_summary(
     controls_df
         Same ``controls_df`` passed to ``optimize_prices`` when the model has
         control features; required for the revenue panel in that case.
+    at_period
+        Calendar date for the reference-revenue bars. Pass the same value used
+        in ``optimize_prices`` when trend or seasonality is on.
     include_revenue_comparison
         If False, only the price panel is drawn (or the only panel when ``ax``
         is set).
@@ -709,6 +713,7 @@ def plot_optimization_summary(
                 price=float(align.ref_prices[i]),
                 sku_idx=i,
                 X_row=X_row,
+                at_period=at_period,
             )
 
     _draw_optimization_summary_bars(

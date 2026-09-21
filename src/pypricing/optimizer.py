@@ -11,6 +11,8 @@ import pandas as pd
 if TYPE_CHECKING:
     from pypricing.models.basic import DemandModel
 
+_N_PRICE_GRID = 64
+
 
 def mean_revenue_at_price(
     *,
@@ -18,12 +20,15 @@ def mean_revenue_at_price(
     price: float,
     sku_idx: int,
     X_row: np.ndarray | None,
+    at_period: pd.Timestamp | str | None = None,
 ) -> float:
     """
-    Posterior mean of revenue ``price * exp(mu)`` for one SKU at a single price.
+    Posterior mean of expected revenue for one SKU at a single price.
 
-    ``mu`` is the mean log-quantity from the demand curve (sigma not folded into
-    ``exp(mu)``; same convention as :meth:`DemandModel.sample_posterior_predictive`).
+    Expected quantity on a draw is ``exp(mu + sigma**2 / 2)``: ``mu`` is the
+    demand-curve mean log-quantity, and the lognormal factor is the mean of
+    ``exp(mu + sigma * e)``. That is the same target as ``quantity_mean`` from
+    :meth:`DemandModel.predict`.
     """
     if getattr(model, "cross_elasticity", None) is not None:
         raise NotImplementedError(
@@ -37,19 +42,22 @@ def mean_revenue_at_price(
 
     log_p = float(np.log(price))
     assert model.idata is not None
-    t_years = model._t_years_for_counterfactual(1)
-    X_season = model._season_features_for_counterfactual(1)
+    posterior = model.idata.posterior
+    t_years = model._t_years_for_counterfactual(1, at_period)
+    X_season = model._season_features_for_counterfactual(1, at_period)
     mu = model.compute_mu_from_posterior(
-        posterior=model.idata.posterior,
+        posterior=posterior,
         log_price=np.array([log_p], dtype=np.float64),
         obs_sku_idx=np.array([sku_idx], dtype=np.int64),
         X_control=X_row,
         t_years=t_years,
         X_season=X_season,
     )
-    q = np.exp(mu)
-    revenue = price * q
-    return float(np.mean(revenue))
+    sigma = np.asarray(posterior["sigma"].values, dtype=np.float64).reshape(
+        mu.shape[0], mu.shape[1]
+    )
+    expected_q = np.exp(mu + 0.5 * np.square(sigma)[:, :, None])
+    return float(np.mean(price * expected_q))
 
 
 def _negative_mean_revenue(
@@ -57,6 +65,7 @@ def _negative_mean_revenue(
     model: "DemandModel",
     sku_idx: int,
     X_row: np.ndarray | None,
+    at_period: pd.Timestamp | str | None,
 ) -> float:
     p = float(np.exp(log_price))
     return -mean_revenue_at_price(
@@ -64,6 +73,7 @@ def _negative_mean_revenue(
         price=p,
         sku_idx=sku_idx,
         X_row=X_row,
+        at_period=at_period,
     )
 
 
@@ -74,30 +84,66 @@ def optimize_price_one_sku(
     price_low: float,
     price_high: float,
     X_row: np.ndarray | None,
+    at_period: pd.Timestamp | str | None = None,
     options: dict[str, Any] | None = None,
 ) -> float:
-    """Maximize posterior mean revenue for one SKU over ``[price_low, price_high]``."""
+    """Maximize posterior mean expected revenue over ``[price_low, price_high]``.
+
+    Scores a log-price grid, including both bounds, then polishes the best grid
+    point. The grid is what keeps a second peak from being missed by a single
+    unimodal search.
+    """
     from scipy.optimize import minimize_scalar
 
     if price_low <= 0 or price_high <= 0 or price_low >= price_high:
         raise ValueError("Need 0 < price_low < price_high")
 
+    log_low = float(np.log(price_low))
+    log_high = float(np.log(price_high))
+    grid = np.linspace(log_low, log_high, _N_PRICE_GRID)
+    revenues = np.array(
+        [
+            mean_revenue_at_price(
+                model=model,
+                price=float(np.exp(log_p)),
+                sku_idx=sku_idx,
+                X_row=X_row,
+                at_period=at_period,
+            )
+            for log_p in grid
+        ]
+    )
+    best_i = int(np.argmax(revenues))
+    best_log = float(grid[best_i])
+    best_rev = float(revenues[best_i])
+
+    step = float(grid[1] - grid[0])
+    win_lo = max(log_low, best_log - step)
+    win_hi = min(log_high, best_log + step)
+    if win_hi <= win_lo:
+        return float(np.exp(best_log))
+
     opts = {"xatol": 1e-10, "maxiter": 500}
     if options:
         opts.update(options)
-
     res = minimize_scalar(
         _negative_mean_revenue,
-        bounds=(np.log(price_low), np.log(price_high)),
+        bounds=(win_lo, win_hi),
         method="bounded",
-        args=(
-            model,
-            sku_idx,
-            X_row,
-        ),
+        args=(model, sku_idx, X_row, at_period),
         options=opts,
     )
-    return float(np.exp(res.x))
+    polished = float(np.exp(res.x))
+    polished_rev = mean_revenue_at_price(
+        model=model,
+        price=polished,
+        sku_idx=sku_idx,
+        X_row=X_row,
+        at_period=at_period,
+    )
+    if polished_rev >= best_rev:
+        return polished
+    return float(np.exp(best_log))
 
 
 def control_matrix_for_skus(
@@ -157,13 +203,15 @@ def optimize_prices(
     model: "DemandModel",
     price_bounds: Mapping[Any, tuple[float, float]] | pd.Series,
     controls_df: pd.DataFrame | None = None,
+    at_period: pd.Timestamp | str | None = None,
     minimize_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """
-    Maximize posterior **mean** total revenue by choosing one price per SKU.
+    Maximize posterior mean expected revenue by choosing one price per SKU.
 
-    With independent per-SKU demand (no cross-price in the model), this runs one
-    bounded 1D optimization per SKU on log-price. Not available when
+    Expected revenue on a draw is ``price * exp(mu + sigma**2 / 2)``. With
+    independent per-SKU demand (no cross-price in the model), each SKU is a 1D
+    search on log-price inside its bounds. Not available when
     ``cross_elasticity`` is set on the model.
 
     Parameters
@@ -174,22 +222,26 @@ def optimize_prices(
         Mapping each SKU to ``(low, high)`` strictly positive with ``low < high``.
     controls_df
         One row per SKU with ``sku_col`` and all ``control_names`` if controls were used.
+    at_period
+        Calendar date for trend and seasonality. Defaults to the last training date.
+        Ignored when the model has neither.
     minimize_options
-        Forwarded to :func:`scipy.optimize.minimize_scalar` ``options``.
+        Forwarded to the local :func:`scipy.optimize.minimize_scalar` polish.
 
     Notes
     -----
-    For ``log_log`` demand, expected revenue in ``p`` is proportional to ``p^(1+e)``
-    for each posterior draw; if elasticity is roughly constant, the optimum often lies
-    on the **boundary** of ``price_bounds``.
+    For ``log_log`` demand, expected revenue on a draw is proportional to
+    ``p^(1+e)``. That is monotone in price unless ``e == -1``, and a posterior
+    that straddles ``-1`` is U-shaped, so the maximum on an interval is always
+    an endpoint of ``price_bounds``.
 
     Returns
     -------
     pandas.DataFrame
-        Columns: ``optimal_price``, ``mean_revenue`` (posterior mean revenue at that
-        price for that SKU), ``at_bound`` (``"low"`` / ``"high"`` / ``None``, whether
-        the optimum landed on the corresponding ``price_bounds`` edge rather than an
-        interior price); index = SKU.
+        Columns: ``optimal_price``, ``mean_revenue`` (posterior mean expected
+        revenue at that price for that SKU), ``at_bound`` (``"low"`` / ``"high"``
+        / ``None``, whether the optimum landed on the corresponding
+        ``price_bounds`` edge rather than an interior price); index = SKU.
     """
     model._require_fitted()
     if getattr(model, "cross_elasticity", None) is not None:
@@ -212,6 +264,7 @@ def optimize_prices(
             price_low=low,
             price_high=high,
             X_row=X_row,
+            at_period=at_period,
             options=minimize_options,
         )
         mrev = mean_revenue_at_price(
@@ -219,6 +272,7 @@ def optimize_prices(
             price=opt_p,
             sku_idx=i,
             X_row=X_row,
+            at_period=at_period,
         )
 
         tol = 1e-3 * (high - low)
@@ -247,10 +301,11 @@ def optimize_prices(
         if getattr(model, "model_name", None) == "log_log":
             msg += (
                 " This is expected for log_log demand: revenue is proportional to "
-                "price^(1+elasticity), which is monotonic in price for any constant "
-                "elasticity != -1, so the constrained optimum is always a bound, not "
-                "a genuine trade-off point. If you want a real interior optimum, use "
-                "QuadraticLogDemandModel or SigmoidSaturationDemandModel instead."
+                "price^(1+elasticity). Any draw with elasticity other than -1 is "
+                "monotone in price, and a posterior that straddles -1 is U-shaped, "
+                "so the constrained optimum is always a price_bounds endpoint. An "
+                "interior revenue maximum needs a price-dependent elasticity "
+                "(QuadraticLogDemandModel or SigmoidSaturationDemandModel)."
             )
         else:
             msg += (

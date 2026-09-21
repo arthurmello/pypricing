@@ -713,6 +713,7 @@ class DemandModel:
         *,
         reference_prices: Any = None,
         controls_df: pd.DataFrame | None = None,
+        at_period: pd.Timestamp | str | None = None,
         include_revenue_comparison: bool = True,
         ax=None,
     ):
@@ -723,6 +724,7 @@ class DemandModel:
             opt_df,
             reference_prices=reference_prices,
             controls_df=controls_df,
+            at_period=at_period,
             include_revenue_comparison=include_revenue_comparison,
             ax=ax,
         )
@@ -1024,6 +1026,7 @@ class DemandModel:
         price_bounds: dict[Any, tuple[float, float]] | pd.Series,
         *,
         controls_df: pd.DataFrame | None = None,
+        at_period: pd.Timestamp | str | None = None,
         minimize_options: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
         from pypricing.optimizer import optimize_prices as _optimize_prices
@@ -1033,6 +1036,7 @@ class DemandModel:
             model=self,
             price_bounds=price_bounds,
             controls_df=controls_df,
+            at_period=at_period,
             minimize_options=minimize_options,
         )
 
