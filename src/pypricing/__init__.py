@@ -20,7 +20,7 @@ from pypricing.synthetic_data import generate_mock_data
 try:
     __version__ = version("pypricing")
 except PackageNotFoundError:  # pragma: no cover - editable/src path without install
-    __version__ = "0.0.1"
+    __version__ = "0.0.2"
 
 __all__ = [
     "__version__",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pypricing"
-version = "0.0.1"
+version = "0.0.2"
 description = "Bayesian price analytics with PyMC"
 readme = "README.md"
 license = "Apache-2.0"
