@@ -68,14 +68,12 @@ class _PanelSim:
     n_skus: int
     n_reg: int
     n_periods: int
-    n_regions: int | None
     n_controls: int
     n_categories: int | None
     demand_shape: str
     effects: _SkuEffects
     cat_idx: np.ndarray | None
     region_labels: list[str] | None
-    region_shift: np.ndarray
     control_coefs: np.ndarray | None
     log_price_panel: np.ndarray
     gamma_map: dict[tuple[int, int], float] | None
@@ -362,6 +360,7 @@ def _mean_log_quantity(
     price: np.ndarray,
     elasticity: float,
     curvature: float | None,
+    log_p_mid: float,
 ) -> np.ndarray:
     match demand_shape:
         case "log_log":
@@ -369,12 +368,10 @@ def _mean_log_quantity(
         case "quadratic":
             if curvature is None:
                 raise RuntimeError("quadratic demand requires curvature")
-            log_p_mid = float(np.median(log_price))
             beta1 = elasticity - 2.0 * curvature * log_p_mid
             return common + beta1 * log_price + curvature * (log_price**2)
         case "sigmoid":
             # Same form as SigmoidSaturationDemandModel; multiplier steepens the bend.
-            log_p_mid = float(np.median(log_price))
             p_center = np.exp(log_p_mid)
             b = _SIGMOID_SLOPE_MULTIPLIER * (-2.0 * elasticity / p_center)
             z = b * (price - p_center)
@@ -438,6 +435,7 @@ def _simulate_panel_rows(
     log_price_obs, demand_shocks, controls_panel, instruments_panel = (
         _draw_observed_log_prices(rng, sim)
     )
+    sku_log_p_mid = np.median(log_price_obs, axis=(1, 2))
 
     for s in range(sim.n_skus):
         for r in range(sim.n_reg):
@@ -452,7 +450,6 @@ def _simulate_panel_rows(
                 else np.sin(sim.annual_phase)
             )
             season_term = beta_season * season if sim.include_seasonality else 0.0
-            shift_r = sim.region_shift[r] if sim.n_regions is not None else 0.0
 
             if (
                 sim.n_controls
@@ -476,7 +473,6 @@ def _simulate_panel_rows(
 
             common = (
                 sim.effects.intercept[s]
-                + shift_r
                 + season_term
                 + ctrl_term
                 + trend_term
@@ -493,6 +489,7 @@ def _simulate_panel_rows(
                     if sim.effects.curvature is None
                     else float(sim.effects.curvature[s])
                 ),
+                log_p_mid=float(sku_log_p_mid[s]),
             )
 
             if sim.gamma_map is not None:
@@ -639,13 +636,16 @@ def generate_mock_data(
 
     * ``"log_log"`` — ``LogLogDemandModel``: ``log Q ≈ α + ε log P + …``
     * ``"quadratic"`` — ``QuadraticLogDemandModel``: ``log Q ≈ α + β₁ log P + κ (log P)² + …``
-      with ``β₁ = ε - 2 κ log P_mid`` and ``log P_mid`` the median log price on the path.
+      with ``β₁ = ε - 2 κ log P_mid`` and ``log P_mid`` the SKU's median observed
+      log price, pooled across regions.
       Curvature ``κ`` uses a wider draw and a floor on ``|κ|`` so the parabolic term is easy to see.
     * ``"sigmoid"`` — ``SigmoidSaturationDemandModel``: ``log Q ≈ α - softplus(z) + …``
-      with ``z = b (P - P_mid)``, ``P_mid = exp(median log P)``, and ``b`` proportional to
+      with ``z = b (P - P_mid)``, ``P_mid = exp(SKU median log P)`` pooled across
+      regions, and ``b`` proportional to
       ``-2 ε / P_mid`` (synthetic data applies a slope multiplier so the saturation bend is clearer).
 
-    Common additions: region shift, controls, seasonality, Gaussian noise.
+    Common additions: controls, seasonality, Gaussian noise. Regions are separate
+    price paths and cross-price cells, with no region intercept.
 
     Prices use a random walk on log scale (one series per SKU–region path).
     Optional ``iv_*`` columns shift log-price; ``endogeneity`` leaks the demand
@@ -670,7 +670,8 @@ def generate_mock_data(
     n_regions
         If ``None``, no ``region`` column and one slice per (period, sku).
         If ``>= 1``, include ``region_1`` … and expand to the full grid with
-        one independent price path per (sku, region).
+        one independent price path per (sku, region). Demand has no region
+        intercept.
     n_controls
         Count of ``control_1`` … columns (standard normals). One coefficient per
         column, shared across SKUs, matching ``beta_control``.
@@ -773,10 +774,6 @@ def generate_mock_data(
         demand_shape=demand_shape,
     )
 
-    region_shift = (
-        rng.normal(0, 0.15, size=n_regions) if n_regions is not None else np.zeros(1)
-    )
-
     control_coefs = (
         rng.normal(0, 0.12, size=n_controls) if n_controls else None
     )
@@ -810,14 +807,12 @@ def generate_mock_data(
             n_skus=n_skus,
             n_reg=n_reg,
             n_periods=n_periods,
-            n_regions=n_regions,
             n_controls=n_controls,
             n_categories=n_categories,
             demand_shape=demand_shape,
             effects=effects,
             cat_idx=cat_idx,
             region_labels=region_labels,
-            region_shift=region_shift,
             control_coefs=control_coefs,
             log_price_panel=log_price_panel,
             gamma_map=gamma_map,

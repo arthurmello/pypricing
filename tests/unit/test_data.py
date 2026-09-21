@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -271,6 +273,27 @@ def test_from_frame_parse_period_requires_column():
     df = pd.DataFrame({"sku": ["a"], "price": [1.0], "quantity": [1.0]})
     with pytest.raises(ValueError, match="Missing period column"):
         PricePanelData.from_frame(df, parse_period=True)
+
+
+def test_duplicate_rows_ignore_region_when_region_col_is_set():
+    df = pd.DataFrame(
+        {
+            "sku": ["a", "a"],
+            "period": [0, 0],
+            "region": ["east", "west"],
+            "price": [10.0, 12.0],
+            "quantity": [5.0, 6.0],
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        PricePanelData.from_frame(df, panel_columns=PanelColumns(region_col="region"))
+
+    duplicated = pd.concat([df, df.iloc[[0]]], ignore_index=True)
+    with pytest.warns(UserWarning, match="sku, period, region"):
+        PricePanelData.from_frame(
+            duplicated, panel_columns=PanelColumns(region_col="region")
+        )
 
 
 def test_period_to_t_years():

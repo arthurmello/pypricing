@@ -383,11 +383,15 @@ class PricePanelData:
             extra = [*group_columns, *extra]
 
         if cols.period_col in df.columns:
-            dup_counts = df.groupby([sku_col, cols.period_col]).size()
+            dup_key = [sku_col, cols.period_col]
+            if cols.region_col is not None and cols.region_col in df.columns:
+                dup_key.append(cols.region_col)
+            dup_counts = df.groupby(dup_key, sort=False).size()
             n_dup_groups = int((dup_counts > 1).sum())
             if n_dup_groups:
+                keys = ", ".join(dup_key)
                 warnings.warn(
-                    f"Found {n_dup_groups} ({sku_col}, {cols.period_col}) combination(s) "
+                    f"Found {n_dup_groups} ({keys}) combination(s) "
                     "with more than one row; they will be fit as independent "
                     "observations. If this is unintentional (e.g. a duplicated "
                     "join), deduplicate before fitting.",

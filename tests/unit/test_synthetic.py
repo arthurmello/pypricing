@@ -226,6 +226,57 @@ def test_n_instruments_negative():
         generate_mock_data(n_periods=4, n_skus=2, n_instruments=-1, random_state=0)
 
 
+def test_regions_share_one_sku_intercept_and_curve():
+    noise_sigma = 0.05
+    df, truth = generate_mock_data(
+        n_periods=24,
+        n_skus=2,
+        n_regions=2,
+        noise_sigma=noise_sigma,
+        include_seasonality=False,
+        round_quantity=False,
+        shape="log_log",
+        random_state=0,
+        return_truth=True,
+    )
+    label_to_i = {lab: i for i, lab in enumerate(truth.sku_labels)}
+    residuals = [
+        row.log_quantity
+        - truth.alpha_sku[label_to_i[row.sku]]
+        - truth.elasticity_sku[label_to_i[row.sku]] * row.log_price
+        for row in df.itertuples(index=False)
+    ]
+    assert np.std(residuals) == pytest.approx(noise_sigma, rel=0.25)
+
+    df_q, truth_q = generate_mock_data(
+        n_periods=24,
+        n_skus=2,
+        n_regions=2,
+        noise_sigma=noise_sigma,
+        include_seasonality=False,
+        round_quantity=False,
+        shape="quadratic",
+        random_state=1,
+        return_truth=True,
+    )
+    assert truth_q.curvature_sku is not None
+    label_to_i = {lab: i for i, lab in enumerate(truth_q.sku_labels)}
+    residuals_q = []
+    for sku, sku_rows in df_q.groupby("sku", sort=False):
+        s = label_to_i[sku]
+        log_p_mid = float(np.median(sku_rows["log_price"]))
+        curvature = float(truth_q.curvature_sku[s])
+        beta1 = float(truth_q.elasticity_sku[s] - 2.0 * curvature * log_p_mid)
+        for row in sku_rows.itertuples(index=False):
+            residuals_q.append(
+                row.log_quantity
+                - truth_q.alpha_sku[s]
+                - beta1 * row.log_price
+                - curvature * row.log_price**2
+            )
+    assert np.std(residuals_q) == pytest.approx(noise_sigma, rel=0.25)
+
+
 def test_control_coefs_are_shared_across_skus():
     noise_sigma = 0.05
     df, truth = generate_mock_data(
