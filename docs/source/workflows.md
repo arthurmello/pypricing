@@ -16,6 +16,12 @@ Prediction requires:
 
 Unknown SKUs at prediction time raise an error (no cold-start handling yet).
 
+If the model was fit with instruments, the control-function residual is set to 0.
+`predict`, posterior predictive calibration, and `fit_train_test` all use that
+structural curve. In-sample HDI coverage is coverage of the structural curve,
+not of the observation model fitted during estimation, which still includes the
+residual.
+
 ## Train/test evaluation (time-aware)
 
 `fit_train_test(df, period_col="period", test_size=0.2, ...)`:
