@@ -224,3 +224,50 @@ def test_endogeneity_changes_price():
 def test_n_instruments_negative():
     with pytest.raises(ValueError, match="n_instruments"):
         generate_mock_data(n_periods=4, n_skus=2, n_instruments=-1, random_state=0)
+
+
+def test_cross_prices_use_observed_log_prices():
+    """Competitor prices in the demand equation include instrument and endogeneity shocks."""
+    noise_sigma = 0.05
+    df, truth = generate_mock_data(
+        n_periods=60,
+        n_skus=4,
+        n_instruments=1,
+        instrument_coef=1.5,
+        endogeneity=1.5,
+        noise_sigma=noise_sigma,
+        cross_elasticity="all",
+        include_seasonality=False,
+        round_quantity=False,
+        random_state=0,
+        shape="log_log",
+        return_truth=True,
+    )
+    assert truth.gamma_pair is not None
+    label_to_i = {lab: i for i, lab in enumerate(truth.sku_labels)}
+    n_skus = len(truth.sku_labels)
+    residuals = []
+    cross_terms = []
+    for _, cell in df.groupby("period", sort=False):
+        log_p = np.empty(n_skus)
+        log_q = np.empty(n_skus)
+        for row in cell.itertuples(index=False):
+            i = label_to_i[row.sku]
+            log_p[i] = row.log_price
+            log_q[i] = row.log_quantity
+        for s in range(n_skus):
+            cross = 0.0
+            for j in range(n_skus):
+                if j == s:
+                    continue
+                cross += truth.gamma_pair.get((s, j), 0.0) * log_p[j]
+            cross_terms.append(cross)
+            residuals.append(
+                log_q[s]
+                - truth.alpha_sku[s]
+                - truth.elasticity_sku[s] * log_p[s]
+                - cross
+            )
+    residuals = np.asarray(residuals)
+    assert np.std(cross_terms) > 2.0 * noise_sigma
+    assert np.std(residuals) == pytest.approx(noise_sigma, rel=0.25)

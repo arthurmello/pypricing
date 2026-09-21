@@ -381,33 +381,68 @@ def _mean_log_quantity(
             raise ValueError(f"Unsupported demand shape: {demand_shape}")
 
 
+def _draw_observed_log_prices(
+    rng: np.random.Generator,
+    sim: _PanelSim,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+    """Log prices after instruments and endogeneity, plus the shocks that built them.
+
+    Drawn in the same SKU–region order as the quantity loop so a fixed seed keeps
+    the same shocks. Cross-price terms must use these log prices, not the
+    pre-shock random walk.
+    """
+    n_skus = sim.n_skus
+    n_reg = sim.n_reg
+    n_periods = sim.n_periods
+    log_price_obs = np.empty((n_skus, n_reg, n_periods), dtype=np.float64)
+    demand_shocks = np.empty((n_skus, n_reg, n_periods), dtype=np.float64)
+    controls_panel = (
+        np.empty((n_skus, n_reg, n_periods, sim.n_controls), dtype=np.float64)
+        if sim.n_controls
+        else None
+    )
+    instruments_panel = (
+        np.empty((n_skus, n_reg, n_periods, sim.n_instruments), dtype=np.float64)
+        if sim.n_instruments
+        else None
+    )
+
+    for s in range(n_skus):
+        for r in range(n_reg):
+            log_price = np.asarray(sim.log_price_panel[s, r, :], dtype=np.float64).copy()
+            demand_shock = rng.normal(0, sim.noise_sigma, size=n_periods)
+            if sim.n_instruments:
+                instruments = rng.normal(size=(n_periods, sim.n_instruments))
+                log_price = log_price + sim.instrument_coef * instruments.sum(axis=1)
+                assert instruments_panel is not None
+                instruments_panel[s, r] = instruments
+            if sim.endogeneity:
+                log_price = log_price + sim.endogeneity * demand_shock
+            if sim.n_controls:
+                assert controls_panel is not None
+                controls_panel[s, r] = rng.normal(size=(n_periods, sim.n_controls))
+            log_price_obs[s, r] = log_price
+            demand_shocks[s, r] = demand_shock
+    return log_price_obs, demand_shocks, controls_panel, instruments_panel
+
+
 def _simulate_panel_rows(
     rng: np.random.Generator,
     sim: _PanelSim,
 ) -> list[dict]:
     rows: list[dict] = []
     beta_season = _PANEL_SEASON_BETA
-    sigma = sim.noise_sigma
     hierarchy = sim.effects.hierarchy
+    log_price_obs, demand_shocks, controls_panel, instruments_panel = (
+        _draw_observed_log_prices(rng, sim)
+    )
 
     for s in range(sim.n_skus):
         for r in range(sim.n_reg):
-            log_price = np.asarray(sim.log_price_panel[s, r, :], dtype=np.float64).copy()
-            demand_shock = rng.normal(0, sigma, size=sim.n_periods)
-
-            if sim.n_instruments:
-                instruments = rng.normal(size=(sim.n_periods, sim.n_instruments))
-                log_price = (
-                    log_price
-                    + sim.instrument_coef * instruments.sum(axis=1)
-                )
-            else:
-                instruments = None
-
-            if sim.endogeneity:
-                log_price = log_price + sim.endogeneity * demand_shock
-
+            log_price = log_price_obs[s, r]
+            demand_shock = demand_shocks[s, r]
             price = np.exp(log_price)
+            instruments = None if instruments_panel is None else instruments_panel[s, r]
 
             season = (
                 sim.period_season
@@ -417,8 +452,12 @@ def _simulate_panel_rows(
             season_term = beta_season * season if sim.include_seasonality else 0.0
             shift_r = sim.region_shift[r] if sim.n_regions is not None else 0.0
 
-            if sim.n_controls and sim.control_coefs is not None:
-                controls = rng.normal(size=(sim.n_periods, sim.n_controls))
+            if (
+                sim.n_controls
+                and sim.control_coefs is not None
+                and controls_panel is not None
+            ):
+                controls = controls_panel[s, r]
                 ctrl_term = controls @ sim.control_coefs[s]
             else:
                 controls = None
@@ -462,7 +501,7 @@ def _simulate_panel_rows(
                             continue
                         g = sim.gamma_map.get((s, j))
                         if g is not None:
-                            cross_sum += g * sim.log_price_panel[j, r, t]
+                            cross_sum += g * log_price_obs[j, r, t]
                     mean_log_q[t] += cross_sum
 
             if sim.round_quantity:
@@ -608,7 +647,8 @@ def generate_mock_data(
 
     Prices use a random walk on log scale (one series per SKU–region path).
     Optional ``iv_*`` columns shift log-price; ``endogeneity`` leaks the demand
-    shock into log-price so OLS elasticity is biased.
+    shock into log-price so OLS elasticity is biased. Own-price and cross-price
+    terms both use those observed log prices.
 
     Parameters
     ----------
