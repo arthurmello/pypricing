@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import softplus
 
 from pypricing import generate_mock_data
 
@@ -224,6 +225,32 @@ def test_endogeneity_changes_price():
 def test_n_instruments_negative():
     with pytest.raises(ValueError, match="n_instruments"):
         generate_mock_data(n_periods=4, n_skus=2, n_instruments=-1, random_state=0)
+
+
+def test_sigmoid_truth_elasticity_is_elasticity_at_center():
+    noise_sigma = 0.05
+    df, truth = generate_mock_data(
+        n_periods=30,
+        n_skus=2,
+        noise_sigma=noise_sigma,
+        include_seasonality=False,
+        round_quantity=False,
+        shape="sigmoid",
+        random_state=0,
+        return_truth=True,
+    )
+    label_to_i = {lab: i for i, lab in enumerate(truth.sku_labels)}
+    residuals = []
+    for sku, sku_rows in df.groupby("sku", sort=False):
+        s = label_to_i[sku]
+        p_center = float(np.exp(np.median(sku_rows["log_price"])))
+        b = -2.0 * float(truth.elasticity_sku[s]) / p_center
+        for row in sku_rows.itertuples(index=False):
+            z = b * (row.price - p_center)
+            residuals.append(
+                row.log_quantity - truth.alpha_sku[s] + softplus(z)
+            )
+    assert np.std(residuals) == pytest.approx(noise_sigma, rel=0.25)
 
 
 def test_regions_share_one_sku_intercept_and_curve():

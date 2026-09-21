@@ -19,11 +19,9 @@ from pypricing.model_components.cross_elasticity import (
 
 RandomState = Union[int, np.random.Generator, None]
 
-# Stronger nonlinearity for ``shape="quadratic"`` / ``"sigmoid"`` so demo plots show
-# visible curvature (still the same functional form as the corresponding model).
+# Wider curvature draws so quadratic demo plots show a visible bend.
 _QUADRATIC_CURVATURE_STD = 0.55
 _QUADRATIC_CURVATURE_MIN_ABS = 0.12
-_SIGMOID_SLOPE_MULTIPLIER = 2.8
 _PANEL_NOISE_SIGMA = 0.12
 _PANEL_SEASON_BETA = 0.15
 
@@ -371,9 +369,8 @@ def _mean_log_quantity(
             beta1 = elasticity - 2.0 * curvature * log_p_mid
             return common + beta1 * log_price + curvature * (log_price**2)
         case "sigmoid":
-            # Same form as SigmoidSaturationDemandModel; multiplier steepens the bend.
             p_center = np.exp(log_p_mid)
-            b = _SIGMOID_SLOPE_MULTIPLIER * (-2.0 * elasticity / p_center)
+            b = -2.0 * elasticity / p_center
             z = b * (price - p_center)
             return common - softplus(z)
         case _:
@@ -641,8 +638,7 @@ def generate_mock_data(
       Curvature ``κ`` uses a wider draw and a floor on ``|κ|`` so the parabolic term is easy to see.
     * ``"sigmoid"`` — ``SigmoidSaturationDemandModel``: ``log Q ≈ α - softplus(z) + …``
       with ``z = b (P - P_mid)``, ``P_mid = exp(SKU median log P)`` pooled across
-      regions, and ``b`` proportional to
-      ``-2 ε / P_mid`` (synthetic data applies a slope multiplier so the saturation bend is clearer).
+      regions, and ``b = -2 ε / P_mid`` so elasticity at the center equals ``ε``.
 
     Common additions: controls, seasonality, Gaussian noise. Regions are separate
     price paths and cross-price cells, with no region intercept.
