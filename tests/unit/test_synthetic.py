@@ -226,6 +226,34 @@ def test_n_instruments_negative():
         generate_mock_data(n_periods=4, n_skus=2, n_instruments=-1, random_state=0)
 
 
+def test_control_coefs_are_shared_across_skus():
+    noise_sigma = 0.05
+    df, truth = generate_mock_data(
+        n_periods=40,
+        n_skus=3,
+        n_controls=2,
+        noise_sigma=noise_sigma,
+        include_seasonality=False,
+        round_quantity=False,
+        random_state=0,
+        return_truth=True,
+    )
+    assert truth.control_coefs is not None
+    assert truth.control_coefs.shape == (2,)
+    label_to_i = {lab: i for i, lab in enumerate(truth.sku_labels)}
+    residuals = []
+    for row in df.itertuples(index=False):
+        s = label_to_i[row.sku]
+        controls = np.array([row.control_1, row.control_2], dtype=np.float64)
+        residuals.append(
+            row.log_quantity
+            - truth.alpha_sku[s]
+            - truth.elasticity_sku[s] * row.log_price
+            - controls @ truth.control_coefs
+        )
+    assert np.std(residuals) == pytest.approx(noise_sigma, rel=0.25)
+
+
 def test_cross_prices_use_observed_log_prices():
     """Competitor prices in the demand equation include instrument and endogeneity shocks."""
     noise_sigma = 0.05

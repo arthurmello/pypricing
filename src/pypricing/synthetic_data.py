@@ -33,6 +33,8 @@ class MockDataTruth:
     """Ground-truth DGP parameters for a panel from :func:`generate_mock_data`.
 
     SKU-aligned arrays match labels ``sku_1``, … in ``sku_labels`` order.
+    ``control_coefs``, when present, is one vector of length ``n_controls``
+    shared by every SKU.
     """
 
     shape: str
@@ -458,7 +460,7 @@ def _simulate_panel_rows(
                 and controls_panel is not None
             ):
                 controls = controls_panel[s, r]
-                ctrl_term = controls @ sim.control_coefs[s]
+                ctrl_term = controls @ sim.control_coefs
             else:
                 controls = None
                 ctrl_term = 0.0
@@ -670,7 +672,8 @@ def generate_mock_data(
         If ``>= 1``, include ``region_1`` … and expand to the full grid with
         one independent price path per (sku, region).
     n_controls
-        Count of ``control_1`` … columns (standard normals with random coefficients).
+        Count of ``control_1`` … columns (standard normals). One coefficient per
+        column, shared across SKUs, matching ``beta_control``.
     random_state
         Seed or ``numpy.random.Generator``.
     start_date
@@ -775,7 +778,7 @@ def generate_mock_data(
     )
 
     control_coefs = (
-        rng.normal(0, 0.12, size=(n_skus, n_controls)) if n_controls else None
+        rng.normal(0, 0.12, size=n_controls) if n_controls else None
     )
 
     cat_idx: np.ndarray | None = None
