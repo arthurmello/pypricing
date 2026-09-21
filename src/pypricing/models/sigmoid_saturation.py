@@ -14,6 +14,7 @@ from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
+from pypricing.model_components.iv_terms import get_control_function_term
 
 
 class SigmoidSaturationDemandModel(DemandModel):
@@ -27,6 +28,10 @@ class SigmoidSaturationDemandModel(DemandModel):
     equals ``elasticity_sku``. ``log_price_center_sku`` is learned; its prior mean is
     the per-SKU training median log-price. Prefer when response flattens at extreme
     prices.
+
+    Optional control-function IV: same first-stage residual as log-log / quadratic.
+    Estimation uses it; ``predict`` / ``optimize_prices`` use the structural curve
+    (residual 0).
     """
 
     @property
@@ -82,6 +87,13 @@ class SigmoidSaturationDemandModel(DemandModel):
             season_term = get_season_term(
                 self.model_config, data, components=self.seasonality_
             )
+            control_function_term = get_control_function_term(
+                self.model_config,
+                data,
+                trend=self.trend,
+                t0=self.t0_,
+                seasonality_components=self.seasonality_,
+            )
 
             b_sku = -2.0 * elasticity_sku / price_center_sku
             z = b_sku[obs_sku] * (price - price_center_sku[obs_sku])
@@ -93,6 +105,7 @@ class SigmoidSaturationDemandModel(DemandModel):
                 + self._cross_term(data)
                 + trend_term
                 + season_term
+                + control_function_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model

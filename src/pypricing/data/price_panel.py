@@ -93,6 +93,12 @@ class PanelColumns:
     quantity_col: str = "quantity"
     quantity_floor: float = 1.0
     control_columns: tuple[str, ...] | None = None
+    iv_columns: tuple[str, ...] | None = None
+    """Instrument columns for control-function IV (``LogLogDemandModel`` only).
+
+    ``None`` (default) auto-detects columns named ``iv_*``. An empty tuple
+    disables IV even if such columns exist.
+    """
     group_columns: tuple[str, ...] | None = None
     period_col: str = "period"
     region_col: str | None = None
@@ -103,8 +109,31 @@ class PanelColumns:
     Set to ``None`` to disable the check."""
 
 
-def _auto_control_columns(df: pd.DataFrame) -> tuple[str, ...]:
-    return tuple(c for c in df.columns if c.startswith("control_"))
+def _auto_prefix_columns(df: pd.DataFrame, prefix: str) -> tuple[str, ...]:
+    return tuple(c for c in df.columns if c.startswith(prefix))
+
+
+def _resolve_feature_columns(
+    df: pd.DataFrame,
+    specified: tuple[str, ...] | None,
+    *,
+    auto_prefix: str,
+    label: str,
+    reserved: set[str],
+) -> tuple[str, ...]:
+    if specified is None:
+        cols = _auto_prefix_columns(df, auto_prefix)
+    else:
+        cols = tuple(specified)
+        if len(set(cols)) != len(cols):
+            raise ValueError(f"{label} must not contain duplicates")
+        bad = set(cols) - set(df.columns)
+        if bad:
+            raise ValueError(f"{label} not in frame: {sorted(bad)}")
+    overlap = set(cols) & reserved
+    if overlap:
+        raise ValueError(f"{label} must not overlap sku/price/quantity: {overlap}")
+    return cols
 
 
 def floor_censored_fraction(
@@ -247,6 +276,8 @@ class PricePanelData:
     sku_levels: pd.Index
     control_matrix: np.ndarray
     control_names: tuple[str, ...]
+    iv_matrix: np.ndarray
+    iv_names: tuple[str, ...]
     n_obs: int
     hierarchy: HierarchyIndex | None = None
     """Present when ``PanelColumns.group_columns`` were set at build time."""
@@ -256,6 +287,10 @@ class PricePanelData:
     """Directed pair / pool index when cross-elasticity is enabled."""
     period_index: pd.DatetimeIndex | None = None
     """Row-aligned timestamps when ``period_col`` is datetime (or parsed)."""
+
+    @property
+    def n_iv(self) -> int:
+        return int(self.iv_matrix.shape[1])
 
     @property
     def n_cross_pairs(self) -> int:
@@ -281,6 +316,7 @@ class PricePanelData:
             defaults. ``quantity_floor`` is applied as
             ``log(max(quantity, quantity_floor))``. ``group_columns`` are optional
             hierarchy columns, coarse → fine, constant within each SKU.
+            ``iv_columns`` are optional instruments (``None`` auto-detects ``iv_*``).
         parse_period
             If ``True``, require ``period_col`` and convert it with
             :func:`parse_period_index`. If ``False`` (default), attach
@@ -291,23 +327,31 @@ class PricePanelData:
         price_col = cols.price_col
         quantity_col = cols.quantity_col
         quantity_floor = cols.quantity_floor
-        control_columns = cols.control_columns
         group_columns = cols.group_columns
 
         if quantity_floor <= 0:
             raise ValueError("quantity_floor must be positive")
 
-        if control_columns is None:
-            control_columns = _auto_control_columns(df)
-        else:
-            bad = set(control_columns) - set(df.columns)
-            if bad:
-                raise ValueError(f"control_columns not in frame: {sorted(bad)}")
-            overlap_c = set(control_columns) & {sku_col, price_col, quantity_col}
-            if overlap_c:
-                raise ValueError(
-                    f"control_columns must not overlap sku/price/quantity: {overlap_c}"
-                )
+        reserved = {sku_col, price_col, quantity_col}
+        control_columns = _resolve_feature_columns(
+            df,
+            cols.control_columns,
+            auto_prefix="control_",
+            label="control_columns",
+            reserved=reserved,
+        )
+        iv_columns = _resolve_feature_columns(
+            df,
+            cols.iv_columns,
+            auto_prefix="iv_",
+            label="iv_columns",
+            reserved=reserved,
+        )
+        overlap_iv_ctrl = set(iv_columns) & set(control_columns)
+        if overlap_iv_ctrl:
+            raise ValueError(
+                f"iv_columns must not overlap control_columns: {sorted(overlap_iv_ctrl)}"
+            )
 
         if group_columns is not None:
             group_columns = tuple(group_columns)
@@ -321,7 +365,7 @@ class PricePanelData:
         if missing:
             raise ValueError(f"Missing required columns: {sorted(missing)}")
 
-        extra = list(control_columns)
+        extra = [*control_columns, *iv_columns]
         if group_columns is not None:
             bad_g = set(group_columns) - set(df.columns)
             if bad_g:
@@ -330,6 +374,11 @@ class PricePanelData:
             if overlap:
                 raise ValueError(
                     f"group_columns must not overlap sku/price/quantity: {overlap}"
+                )
+            overlap_g_iv = set(group_columns) & set(iv_columns)
+            if overlap_g_iv:
+                raise ValueError(
+                    f"iv_columns must not overlap group_columns: {sorted(overlap_g_iv)}"
                 )
             extra = [*group_columns, *extra]
 
@@ -362,6 +411,8 @@ class PricePanelData:
 
         if len(control_columns) and sub[list(control_columns)].isna().any().any():
             raise ValueError("NaN in control columns are not allowed")
+        if len(iv_columns) and sub[list(iv_columns)].isna().any().any():
+            raise ValueError("NaN in instrument columns are not allowed")
         if group_columns is not None and sub[list(group_columns)].isna().any().any():
             raise ValueError("NaN in group_columns are not allowed")
 
@@ -380,6 +431,11 @@ class PricePanelData:
             control_matrix = sub[list(control_columns)].to_numpy(dtype=np.float64)
         else:
             control_matrix = np.empty((len(sub), 0), dtype=np.float64)
+
+        if len(iv_columns):
+            iv_matrix = sub[list(iv_columns)].to_numpy(dtype=np.float64)
+        else:
+            iv_matrix = np.empty((len(sub), 0), dtype=np.float64)
 
         period_index: pd.DatetimeIndex | None = None
         period_col = cols.period_col
@@ -402,6 +458,8 @@ class PricePanelData:
             sku_levels=sku_levels,
             control_matrix=control_matrix,
             control_names=tuple(control_columns),
+            iv_matrix=iv_matrix,
+            iv_names=tuple(iv_columns),
             n_obs=int(len(sub)),
             hierarchy=hierarchy,
             period_index=period_index,
@@ -504,4 +562,6 @@ class PricePanelData:
         if self.n_cross_pairs > 0:
             out["cross_pair"] = np.arange(self.n_cross_pairs, dtype=np.int64)
             out["cross_pool"] = np.arange(self.n_cross_pool, dtype=np.int64)
+        if self.n_iv > 0:
+            out["iv"] = np.arange(self.n_iv, dtype=np.int64)
         return out

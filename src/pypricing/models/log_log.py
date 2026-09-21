@@ -10,6 +10,7 @@ from pypricing.data import PricePanelData
 from pypricing.models.basic import DemandModel
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
+from pypricing.model_components.iv_terms import get_control_function_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
 
@@ -20,10 +21,15 @@ class LogLogDemandModel(DemandModel):
     Mean log-quantity:
 
     ``mu = alpha_sku + elasticity_sku * log(P) + controls + cross + trend + season``
+    (plus a control-function residual when instruments are present).
 
     ``elasticity_sku`` is own-price elasticity (e.g. ``-1.5`` ≈ 1% price up → 1.5%
     quantity down in expectation). Best as a simple constant-elasticity baseline.
     Quantity-multiplier helpers apply only to this model.
+
+    Optional control-function IV: pass ``iv_columns`` (or ``iv_*`` columns) on
+    ``PanelColumns``. The first-stage residual is used in estimation only;
+    ``predict`` / ``optimize_prices`` use the structural demand curve (residual 0).
     """
 
     @property
@@ -60,6 +66,13 @@ class LogLogDemandModel(DemandModel):
             season_term = get_season_term(
                 self.model_config, data, components=self.seasonality_
             )
+            control_function_term = get_control_function_term(
+                self.model_config,
+                data,
+                trend=self.trend,
+                t0=self.t0_,
+                seasonality_components=self.seasonality_,
+            )
 
             mu = (
                 alpha_sku[obs_sku]
@@ -68,6 +81,7 @@ class LogLogDemandModel(DemandModel):
                 + self._cross_term(data)
                 + trend_term
                 + season_term
+                + control_function_term
             )
             pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
         return model

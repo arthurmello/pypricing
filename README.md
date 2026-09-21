@@ -5,6 +5,7 @@ Bayesian own-price elasticity estimation with PyMC for long-format panels (one r
 This is currently an MVP for log-demand panels (per-SKU intercept + per-SKU elasticity) with:
 
 - optional **shared control** regressors (`control_`* columns)
+- optional **instrumental variables** (`iv_*` columns or `PanelColumns(iv_columns=...)`) on all three demand-curve classes
 - optional **hierarchical / partial pooling** across group columns
 - optional **linear time trend** (`trend="shared"` or `"sku"`)
 - optional **calendar seasonality** (`seasonality="yearly"` / `"weekly"` / `"auto"`)
@@ -93,6 +94,7 @@ _ = model.plot_response_curve(sku=sku0, price_grid=price_grid, controls=controls
   - `quantity` (configurable via `quantity_col`) — must be **non-negative**
 - **Optional**
   - `control_`* columns (or pass an explicit `control_columns=(...)` via `PanelColumns`) — must be numeric, no NaNs
+  - `iv_*` columns (or `iv_columns=(...)`) — instruments for control-function IV. Must be numeric, no NaNs. An empty `iv_columns=()` turns IV off even if `iv_*` columns exist.
   - hierarchy columns (e.g. `category_1`, `category_2`) via `PanelColumns(group_columns=...)`
   - `period` (and often `region`) for `fit_train_test()` / cross-elasticity market cells.
     Integer or string keys are fine. **Datetime `period` is required** if you enable
@@ -205,6 +207,39 @@ If your frame contains `control_*` columns (or you pass `control_columns=(...)`)
 - one global coefficient vector `beta_control` shared across all SKUs
 - controls must also be provided at prediction time
 
+### Instrumental variables (`iv_*`)
+
+Prices are often set using expected demand, so a regression of quantity on price mixes the demand slope with that feedback. Instrument columns identify elasticity from price variation that moves with \(Z\) but not with the demand error.
+
+```python
+from pypricing import LogLogDemandModel, PanelColumns, generate_mock_data
+
+df = generate_mock_data(
+    n_periods=40,
+    n_skus=4,
+    n_instruments=1,      # writes iv_1
+    endogeneity=1.0,      # demand shock also moves price
+    include_seasonality=False,
+    round_quantity=False,
+    random_state=0,
+)
+model = LogLogDemandModel()  # auto-detects iv_* 
+# or: LogLogDemandModel(panel_columns=PanelColumns(iv_columns=("iv_1",)))
+model.fit(df, draws=500, tune=500, chains=2, random_seed=0)
+print(model.run_diagnostics())  # rho, weak_iv
+```
+
+What is fit (log-log; quadratic and sigmoid use the same first-stage residual on their own mean curves):
+
+- **Price:** \(\log P = \alpha^P_{\mathrm{sku}} + Z\pi + X\gamma^P + \text{trend/season} + v\)
+- **Demand:** \(\log Q = \alpha_{\mathrm{sku}} + \varepsilon_{\mathrm{sku}}\log P + X\beta + \rho v + \ldots\)
+
+\(Z\) is excluded from demand. \(\rho\) away from 0 is evidence that price is endogenous. `run_diagnostics()["weak_iv"]` is true when every instrument's 90% interval for \(\pi\) includes 0.
+
+`predict` and `optimize_prices` use the structural demand curve (control residual set to 0). The IV correction is for estimation only.
+
+A valid instrument must move price without moving demand directly. Cost / commodity shocks usually qualify; lagged sales usually do not. The library cannot check the exclusion restriction.
+
 ### Priors and customization (`model_config`)
 
 You can override priors by passing `model_config` to each model class constructor.
@@ -240,6 +275,7 @@ Defaults today:
 - `elasticity_sku ~ Normal(mu=-1, sigma=2)`
 - `sigma ~ HalfNormal(sigma=0.5)`
 - `beta_control ~ Normal(mu=0, sigma=0.5)` (if controls exist)
+- `pi ~ Normal(mu=0, sigma=1)` / `rho ~ Normal(mu=0, sigma=1)` / `sigma_price ~ HalfNormal(sigma=0.5)` (if instruments exist)
 - `mu_trend ~ Normal(mu=0, sigma=0.05)` (if `trend` is set)
 - `beta_season ~ Normal(mu=0, sigma=0.5)` (if `seasonality` is set)
 - `curvature_sku ~ Normal(mu=0, sigma=0.2)` (only for `quadratic`)
