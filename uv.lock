@@ -1767,10 +1767,11 @@ wheels = [
 
 [[package]]
 name = "pypricing"
-version = "0.0.1"
+version = "0.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "arviz" },
+    { name = "graphviz" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
@@ -1790,9 +1791,6 @@ docs = [
     { name = "sphinx", version = "9.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "sphinx-copybutton" },
 ]
-graphviz = [
-    { name = "graphviz" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -1804,7 +1802,7 @@ dev = [
 requires-dist = [
     { name = "arviz", specifier = ">=0.17" },
     { name = "furo", marker = "extra == 'docs'", specifier = ">=2024.1.29" },
-    { name = "graphviz", marker = "extra == 'graphviz'", specifier = ">=0.21" },
+    { name = "graphviz", specifier = ">=0.21" },
     { name = "matplotlib", specifier = ">=3.7" },
     { name = "myst-nb", marker = "extra == 'docs'", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
@@ -1816,7 +1814,7 @@ requires-dist = [
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=7.0" },
     { name = "sphinx-copybutton", marker = "extra == 'docs'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev", "docs", "graphviz"]
+provides-extras = ["dev", "docs"]
 
 [package.metadata.requires-dev]
 dev = [

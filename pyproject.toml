@@ -40,6 +40,7 @@ classifiers = [
 ]
 dependencies = [
     "arviz>=0.17",
+    "graphviz>=0.21",
     "matplotlib>=3.7",
     "numpy>=1.24",
     "pandas>=2.0",
@@ -63,9 +64,6 @@ docs = [
     "myst-nb>=1.0",
     "furo>=2024.1.29",
     "sphinx-copybutton>=0.5",
-]
-graphviz = [
-    "graphviz>=0.21",
 ]
 
 [tool.setuptools.packages.find]

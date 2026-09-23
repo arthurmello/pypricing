@@ -637,14 +637,6 @@ class DemandModel:
             raise RuntimeError(
                 "graphviz() requires the in-memory PyMC model; refit after load()."
             )
-        try:
-            import graphviz  # noqa: F401
-        except ImportError as exc:
-            raise ImportError(
-                "graphviz() requires the optional 'graphviz' extra. "
-                "Install with: pip install 'pypricing[graphviz]' "
-                "(also needs the system Graphviz binaries)."
-            ) from exc
         return pm.model_to_graphviz(self.model)
 
     def plot_elasticity_posterior(self, *, hdi_prob: float = 0.9, ax=None):

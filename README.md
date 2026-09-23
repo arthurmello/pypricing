@@ -10,12 +10,8 @@ hierarchy, trend/seasonality, and counterfactual prediction.
 pip install pypricing
 ```
 
-Optional model-graph rendering (also needs the
-[system Graphviz](https://graphviz.org/download/) binaries):
-
-```bash
-pip install 'pypricing[graphviz]'
-```
+`model.graphviz()` also needs the [system Graphviz](https://graphviz.org/download/)
+binaries (e.g. `brew install graphviz` on macOS).
 
 Full docs (guides + API + notebooks):
 [pypricing.readthedocs.io](https://pypricing.readthedocs.io)
