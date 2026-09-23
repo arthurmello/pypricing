@@ -41,7 +41,7 @@ def test_iv_graph_has_price_equation(model_cls, shape):
     assert "rho" in free
     assert "pi" in free
     assert "sigma_price" in free
-    assert "obs" in observed
+    assert "log_quantity" in observed
     assert "obs_price" in observed
     assert model.iv_names_ == ("iv_1",)
 

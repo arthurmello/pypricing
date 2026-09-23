@@ -83,7 +83,13 @@ class LogLogDemandModel(DemandModel):
                 + season_term
                 + control_function_term
             )
-            pm.Normal("obs", mu=mu, sigma=sigma, observed=data.log_quantity)
+            pm.Normal(
+                "log_quantity",
+                mu=mu,
+                sigma=sigma,
+                observed=data.log_quantity,
+                dims="obs",
+            )
         return model
 
     def compute_mu_from_posterior(
