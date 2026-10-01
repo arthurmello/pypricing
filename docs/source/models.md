@@ -13,17 +13,37 @@ seasonality. Pick the curve via the model class:
 - {class}`~pypricing.QuadraticLogDemandModel`
 - {class}`~pypricing.SigmoidSaturationDemandModel`
 
+## Own-price elasticity
+
+Own-price elasticity is how much quantity moves when its own price moves:
+
+$$
+\varepsilon = \frac{d \log Q}{d \log P}
+$$
+
+$\varepsilon = -1.5$ means a 1% higher price cuts expected quantity by about
+1.5%. The three curves below are different ways to let that slope depend on
+price. Cross-price effects (one SKU's price on another's quantity) are
+separate; see [Hierarchy and cross-elasticity](hierarchy.md).
+
+Further reading:
+- Varian, *Intermediate Microeconomics*, on the definition;
+- Bijmolt, van Heerde, and Pieters (2005), "New empirical generalizations on the
+determinants of price elasticity," *Journal of Marketing Research*, on typical
+retail magnitudes.
+
 ## Log-log (constant elasticity)
 
 $$
 \mu = \alpha_{\mathrm{sku}} + \varepsilon_{\mathrm{sku}} \log P + X\beta + \text{trend} + \text{season}
 $$
 
-$\varepsilon_{\mathrm{sku}}$ is own-price elasticity. Example: $\varepsilon=-1.5$
-implies a 1% price increase → about 1.5% quantity decrease (locally / in
-expectation).
-
 **Best when** you want a simple constant-elasticity approximation.
+
+**Limitation.** Expected revenue scales as $p^{1+\varepsilon}$. Unless
+$\varepsilon = -1$, that is monotone in price, price optimization lands on an
+endpoint of `price_bounds`. An interior optimum needs a price-dependent
+elasticity (quadratic or sigmoid). See [Price optimization](optimization.md).
 
 ## Quadratic (price-dependent elasticity)
 
