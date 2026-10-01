@@ -230,17 +230,9 @@ def test_plotting_smoke():
 
     ax3 = model.plot_posterior_predictive_calibration(
         hdi_prob=0.8,
-        style="series",
         random_seed=0,
     )
     assert ax3 is not None
-
-    ax4 = model.plot_posterior_predictive_calibration(
-        hdi_prob=0.8,
-        style="calibration",
-        random_seed=0,
-    )
-    assert ax4 is not None
 
     bounds = {
         sku: (

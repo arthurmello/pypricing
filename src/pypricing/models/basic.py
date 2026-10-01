@@ -752,7 +752,6 @@ class DemandModel:
         *,
         df: pd.DataFrame | None = None,
         hdi_prob: float = 0.94,
-        style: Literal["series", "calibration"] = "series",
         random_seed: int | None = None,
         ax=None,
     ):
@@ -764,7 +763,6 @@ class DemandModel:
             self,
             df=df,
             hdi_prob=hdi_prob,
-            style=style,
             random_seed=random_seed,
             ax=ax,
         )

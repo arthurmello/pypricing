@@ -733,12 +733,14 @@ def plot_posterior_predictive_calibration(
     *,
     df: pd.DataFrame | None = None,
     hdi_prob: float = 0.94,
-    style: Literal["series", "calibration"] = "series",
     random_seed: int | None = None,
     ax=None,
 ):
     """
     Compare observed quantities on a panel to posterior predictive summaries.
+
+    One point per panel row: observed quantity on x, posterior mean on y,
+    predictive HDI as a vertical bar, and a y = x reference line.
 
     Uses :meth:`~pypricing.models.basic.DemandModel.predict` (mean log-quantity
     path, then Gaussian noise in log space) so intervals reflect epistemic +
@@ -753,11 +755,6 @@ def plot_posterior_predictive_calibration(
         ``model.data``.
     hdi_prob
         Credible level for predictive intervals.
-    style
-        - ``"series"``: observations ordered by ``period_col`` then ``sku_col``
-          (when present); posterior mean line, HDI band, observed markers.
-        - ``"calibration"``: scatter of observed vs posterior mean quantity
-          with a y = x reference line.
     random_seed
         Passed to :meth:`~pypricing.models.basic.DemandModel.predict`.
     ax
@@ -788,80 +785,54 @@ def plot_posterior_predictive_calibration(
     pred = model.predict(work, hdi_prob=hdi_prob, random_seed=random_seed)
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(10, 5) if style == "series" else (6, 6))
+        _, ax = plt.subplots(figsize=(6, 6))
 
     y_obs = pred[model.quantity_col].to_numpy(dtype=float)
     y_mean = pred["quantity_mean"].to_numpy(dtype=float)
     y_lo = pred["quantity_hdi_lower"].to_numpy(dtype=float)
     y_hi = pred["quantity_hdi_upper"].to_numpy(dtype=float)
 
-    if style == "calibration":
-        lo = float(np.nanmin([y_obs.min(), y_mean.min()]))
-        hi = float(np.nanmax([y_obs.max(), y_mean.max()]))
-        if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
-            pad = 1.0 if hi == 0 else abs(hi) * 0.05
-            lo, hi = lo - pad, hi + pad
-        ax.scatter(
-            y_mean,
-            y_obs,
-            alpha=0.55,
-            s=22,
-            edgecolors="none",
-            color="C0",
-            label="Observations",
-        )
-        ax.plot([lo, hi], [lo, hi], color="gray", linestyle="--", linewidth=1.2)
-        ax.set_aspect("equal", adjustable="box")
-        ax.set_xlim(lo, hi)
-        ax.set_ylim(lo, hi)
-        ax.set_xlabel("Predicted quantity (posterior mean)")
-        ax.set_ylabel(f"Observed {model.quantity_col}")
-        ax.set_title(
-            f"Calibration: observed vs predicted mean\n"
-            f"({int(hdi_prob * 100)}% predictive HDI available in series view)"
-        )
-        ax.legend(loc="best")
-        plt.tight_layout()
-        return ax
-
-    # series view
-    sort_cols: list[str] = []
-    if model.period_col in pred.columns:
-        sort_cols.append(model.period_col)
-    if model.sku_col in pred.columns:
-        sort_cols.append(model.sku_col)
-    if sort_cols:
-        pred = pred.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
-        y_obs = pred[model.quantity_col].to_numpy(dtype=float)
-        y_mean = pred["quantity_mean"].to_numpy(dtype=float)
-        y_lo = pred["quantity_hdi_lower"].to_numpy(dtype=float)
-        y_hi = pred["quantity_hdi_upper"].to_numpy(dtype=float)
-
-    x = np.arange(len(pred))
-    ax.fill_between(
-        x,
+    lo = float(np.nanmin([y_obs.min(), y_lo.min(), y_mean.min()]))
+    hi = float(np.nanmax([y_obs.max(), y_hi.max(), y_mean.max()]))
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
+        pad = 1.0 if hi == 0 else abs(hi) * 0.05
+        lo, hi = lo - pad, hi + pad
+    hdi_label = f"{int(hdi_prob * 100)}% predictive HDI"
+    ax.vlines(
+        y_obs,
         y_lo,
         y_hi,
-        alpha=0.25,
         color="C0",
-        label=f"{int(hdi_prob * 100)}% predictive HDI",
+        alpha=0.35,
+        linewidth=0.8,
+        label=hdi_label,
+        zorder=2,
     )
-    ax.plot(x, y_mean, color="C0", linewidth=1.5, label="Posterior mean")
     ax.scatter(
-        x,
         y_obs,
-        color="black",
-        s=14,
+        y_mean,
         alpha=0.75,
-        label="Observed",
+        s=22,
+        edgecolors="none",
+        color="C0",
+        label="Posterior mean",
         zorder=3,
     )
-    xlab = "Observation index"
-    if sort_cols:
-        xlab += f" (sorted by {', '.join(sort_cols)})"
-    ax.set_xlabel(xlab)
-    ax.set_ylabel(model.quantity_col)
-    ax.set_title("Posterior predictive check on panel (training-style data)")
+    ax.plot(
+        [lo, hi],
+        [lo, hi],
+        color="gray",
+        linestyle="--",
+        linewidth=1.2,
+        label="y = x",
+        zorder=1,
+    )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_xlabel(f"Observed {model.quantity_col}")
+    ax.set_ylabel("Predicted quantity (posterior mean)")
+    ax.set_title("Calibration: one point per SKU × period")
     ax.legend(loc="best")
     plt.tight_layout()
     return ax
