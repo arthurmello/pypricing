@@ -49,3 +49,10 @@ print(model.predict(df_scenario, hdi_prob=0.9, random_seed=123).head())
 
 Column names are configurable via `PanelColumns`. Internally the model uses
 `log(price)` and `log(max(quantity, quantity_floor))` (default floor `1.0`).
+
+## When to use pypricing (and when not to use it)
+pypricing assumes products have posted prices that changed over time, and you observe the units sold at each price.
+
+Retail, consumer goods and e-commerce are good use cases: many products, regular sales volume, frequent price or promo changes.
+
+Bad use cases include one-off prices, very low volume, or sales limited by capacity (hotels, airlines).
