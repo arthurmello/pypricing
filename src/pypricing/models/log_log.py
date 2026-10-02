@@ -8,6 +8,10 @@ import xarray as xr
 
 from pypricing.data import PricePanelData
 from pypricing.models.basic import DemandModel
+from pypricing.model_components.priors import (
+    DEFAULT_ELASTICITY_MU,
+    DEFAULT_ELASTICITY_SIGMA,
+)
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.iv_terms import get_control_function_term
@@ -53,8 +57,8 @@ class LogLogDemandModel(DemandModel):
                 "elasticity",
                 data,
                 self.model_config,
-                mu_default_mu=-1.0,
-                mu_default_sigma=2.0,
+                mu_default_mu=DEFAULT_ELASTICITY_MU,
+                mu_default_sigma=DEFAULT_ELASTICITY_SIGMA,
             )
 
             sigma = get_sigma(self.model_config)

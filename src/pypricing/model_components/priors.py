@@ -1,5 +1,8 @@
 from typing import Any
 
+DEFAULT_ELASTICITY_MU = -2.6
+DEFAULT_ELASTICITY_SIGMA = 1.5
+
 
 def resolve_prior(
     *,
