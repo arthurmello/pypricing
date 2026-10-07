@@ -148,6 +148,7 @@ class DemandModel:
         self.cross_pairs_: CrossPairIndex | None = None
         self.t0_: pd.Timestamp | None = None
         self.seasonality_: tuple[str, ...] | None = None
+        self.fit_kwargs_: dict[str, Any] = {}
         self._validate_configuration()
 
     @property
@@ -486,6 +487,7 @@ class DemandModel:
 
     def fit(self, data: pd.DataFrame, **sample_kwargs: Any) -> az.InferenceData:
         self.build_model(data)
+        self.fit_kwargs_ = dict(sample_kwargs)
         sampler_kwargs = dict(self.sampler_config)
         sampler_kwargs.update(sample_kwargs)
         with self.model:
@@ -1070,6 +1072,19 @@ class DemandModel:
         )
 
         return _check_benchmarks(self, extreme_threshold=extreme_threshold)
+
+    def check_falsification(
+        self,
+        df: pd.DataFrame | None = None,
+        *,
+        hdi_prob: float = 0.94,
+        **sample_kwargs: Any,
+    ) -> dict[str, Any]:
+        from pypricing.diagnostics.falsification import (
+            check_falsification as _check_falsification,
+        )
+
+        return _check_falsification(self, df, hdi_prob=hdi_prob, **sample_kwargs)
 
     def optimize_prices(
         self,

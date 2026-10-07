@@ -276,6 +276,35 @@ def test_fit_train_test_metrics():
     assert len(out["test_predictions"]) == out["n_test"]
 
 
+def test_check_falsification_returns_lead_summary():
+    df = generate_mock_data(
+        n_periods=10,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    sample_kw = dict(
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    model.fit(df, **sample_kw)
+    out = model.check_falsification()
+    explicit = model.check_falsification(**sample_kw)
+    assert out["lead_coef_mean"] == pytest.approx(explicit["lead_coef_mean"])
+
+    lo, hi = out["lead_coef_hdi"]
+    assert lo <= out["lead_coef_mean"] <= hi
+    assert out["n"] < len(df)
+    assert list(out["elasticity"].columns) == ["baseline", "with_lead", "shift"]
+    assert len(out["elasticity"]) == 3
+    assert model.control_names_ == ("control_1",)
+
+
 def test_check_fit_in_and_out_of_sample():
     df = generate_mock_data(
         n_periods=12,
