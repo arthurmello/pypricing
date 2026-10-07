@@ -19,6 +19,16 @@ def _require_log_log(model: "DemandModel") -> None:
         )
 
 
+def get_elasticity_means(model: "DemandModel") -> pd.Series:
+    """Posterior mean own-price elasticity per SKU."""
+    model._require_fitted()
+    draws = model.idata.posterior["elasticity_sku"]
+    return pd.Series(
+        draws.mean(dim=("chain", "draw")).to_numpy(),
+        index=pd.Index(model.sku_levels_, name=model.sku_col),
+    )
+
+
 def quantity_multiplier_posterior(
     model: "DemandModel",
     *,

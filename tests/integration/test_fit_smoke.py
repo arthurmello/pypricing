@@ -305,6 +305,55 @@ def test_check_falsification_returns_lead_summary():
     assert model.control_names_ == ("control_1",)
 
 
+def test_check_instruments_reports_all_sections():
+    df = generate_mock_data(
+        n_periods=12,
+        n_skus=3,
+        n_controls=1,
+        n_instruments=2,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    out = model.check_instruments()
+
+    assert out["first_stage"]["f"] > 0
+    assert out["overid"]["applicable"]
+    assert out["overid"]["n_instruments"] == 2
+    assert 0.0 <= out["overid"]["p_value"] <= 1.0
+    lo, hi = out["rho"]["hdi"]
+    assert lo <= out["rho"]["mean"] <= hi
+    assert list(out["elasticity"].columns) == ["iv", "ols", "shift"]
+    assert len(out["elasticity"]) == 3
+
+    no_ols = model.check_instruments(compare_ols=False)
+    assert no_ols["elasticity"] is None
+
+
+def test_check_instruments_requires_instruments():
+    df = generate_mock_data(n_periods=6, n_skus=2, random_state=0)
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=20,
+        tune=20,
+        chains=1,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    with pytest.raises(ValueError, match="no instruments"):
+        model.check_instruments()
+
+
 def test_check_fit_in_and_out_of_sample():
     df = generate_mock_data(
         n_periods=12,

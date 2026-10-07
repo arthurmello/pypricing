@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import warnings
@@ -150,6 +151,24 @@ class DemandModel:
         self.seasonality_: tuple[str, ...] | None = None
         self.fit_kwargs_: dict[str, Any] = {}
         self._validate_configuration()
+
+    def clone(self, **panel_overrides: Any) -> Self:
+        """Unfitted copy with the same configuration.
+
+        ``panel_overrides`` replace fields of ``panel_columns``. Once fitted,
+        ``control_columns`` is pinned to ``control_names_`` unless overridden,
+        so auto-detection can't change the controls between fits.
+        """
+        if self.sku_levels_ is not None:
+            panel_overrides.setdefault("control_columns", self.control_names_)
+        return type(self)(
+            panel_columns=dataclasses.replace(self.panel_columns, **panel_overrides),
+            cross_elasticity=self.cross_elasticity,
+            trend=self.trend,
+            seasonality=self.seasonality,
+            model_config=self.model_config,
+            sampler_config=self.sampler_config,
+        )
 
     @property
     def model_name(self) -> str:
@@ -572,65 +591,9 @@ class DemandModel:
             }
         else:
             out["floor_censored_skus"] = {}
-        out.update(self._iv_diagnostics())
-        return out
+        from pypricing.diagnostics.identification import iv_diagnostics
 
-    def _first_stage_exogenous(self) -> np.ndarray:
-        """Regressors partialled out of the price equation before the instrument F."""
-        assert self.data is not None and self.sku_levels_ is not None
-        sku = pd.Categorical(self.data[self.sku_col], categories=self.sku_levels_)
-        dummies = pd.get_dummies(sku).to_numpy(dtype=np.float64)
-        parts: list[np.ndarray] = [dummies]
-        if self.control_names_:
-            controls = self.data.loc[:, list(self.control_names_)].to_numpy(
-                dtype=np.float64
-            )
-            parts.append(controls)
-        if self.trend is not None:
-            t = self._t_years_for_frame(self.data).reshape(-1, 1)
-            if self.trend == "sku":
-                parts.append(dummies * t)
-            else:
-                parts.append(t)
-        season = self._season_features_for_frame(self.data)
-        if season is not None and season.size:
-            parts.append(season)
-        return np.column_stack(parts)
-
-    def _iv_diagnostics(self, *, hdi_prob: float = 0.9) -> dict[str, Any]:
-        """Endogeneity interval for ``rho`` and the first-stage partial F."""
-        from pypricing.model_components.iv_terms import (
-            WEAK_IV_F_THRESHOLD,
-            first_stage_partial_f,
-        )
-
-        assert self.idata is not None
-        post = self.idata.posterior
-        if "rho" not in post and "pi" not in post:
-            return {}
-
-        out: dict[str, Any] = {}
-        alpha = (1.0 - hdi_prob) / 2.0
-        if "rho" in post:
-            rho = np.asarray(post["rho"].values, dtype=np.float64).ravel()
-            out["rho_mean"] = float(np.mean(rho))
-            lo, hi = np.quantile(rho, [alpha, 1.0 - alpha])
-            out["rho_hdi"] = (float(lo), float(hi))
-            out["rho_hdi_includes_zero"] = bool(lo <= 0.0 <= hi)
-        if self.iv_names_ and self.data is not None:
-            instruments = self.data.loc[:, list(self.iv_names_)].to_numpy(
-                dtype=np.float64
-            )
-            log_price = np.log(
-                self.data[self.price_col].to_numpy(dtype=np.float64)
-            )
-            f_stat = first_stage_partial_f(
-                log_price,
-                instruments,
-                self._first_stage_exogenous(),
-            )
-            out["first_stage_f"] = f_stat
-            out["weak_iv"] = bool(f_stat < WEAK_IV_F_THRESHOLD)
+        out.update(iv_diagnostics(self))
         return out
 
     def graphviz(self):
@@ -1085,6 +1048,21 @@ class DemandModel:
         )
 
         return _check_falsification(self, df, hdi_prob=hdi_prob, **sample_kwargs)
+
+    def check_instruments(
+        self,
+        *,
+        hdi_prob: float = 0.9,
+        compare_ols: bool = True,
+        **sample_kwargs: Any,
+    ) -> dict[str, Any]:
+        from pypricing.diagnostics.identification import (
+            check_instruments as _check_instruments,
+        )
+
+        return _check_instruments(
+            self, hdi_prob=hdi_prob, compare_ols=compare_ols, **sample_kwargs
+        )
 
     def optimize_prices(
         self,

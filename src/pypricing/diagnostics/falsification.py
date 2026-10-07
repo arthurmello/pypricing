@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from pypricing.data import PanelColumns
+from pypricing.posterior import get_elasticity_means
 
 if TYPE_CHECKING:
     from pypricing.models.basic import DemandModel
@@ -53,27 +53,6 @@ def add_lead_log_price(
     return out.sort_index()
 
 
-def _clone(model: DemandModel, control_columns: tuple[str, ...]) -> DemandModel:
-    return type(model)(
-        panel_columns=dataclasses.replace(
-            model.panel_columns, control_columns=control_columns
-        ),
-        cross_elasticity=model.cross_elasticity,
-        trend=model.trend,
-        seasonality=model.seasonality,
-        model_config=model.model_config,
-        sampler_config=model.sampler_config,
-    )
-
-
-def _elasticity_means(model: DemandModel) -> pd.Series:
-    draws = model.idata.posterior["elasticity_sku"]
-    return pd.Series(
-        draws.mean(dim=("chain", "draw")).to_numpy(),
-        index=pd.Index(model.sku_levels_, name=model.sku_col),
-    )
-
-
 def check_falsification(
     model: DemandModel,
     df: pd.DataFrame | None = None,
@@ -99,9 +78,9 @@ def check_falsification(
     work = model.data if df is None else df
     trimmed = add_lead_log_price(work, panel_columns=model.panel_columns)
 
-    baseline = _clone(model, model.control_names_)
+    baseline = model.clone()
     baseline.fit(trimmed, **sample_kwargs)
-    with_lead = _clone(model, (*model.control_names_, LEAD_COL))
+    with_lead = model.clone(control_columns=(*model.control_names_, LEAD_COL))
     with_lead.fit(trimmed, **sample_kwargs)
 
     lead_draws = np.asarray(
@@ -120,8 +99,8 @@ def check_falsification(
 
     elasticity = pd.DataFrame(
         {
-            "baseline": _elasticity_means(baseline),
-            "with_lead": _elasticity_means(with_lead),
+            "baseline": get_elasticity_means(baseline),
+            "with_lead": get_elasticity_means(with_lead),
         }
     )
     elasticity["shift"] = elasticity["with_lead"] - elasticity["baseline"]
