@@ -974,6 +974,9 @@ class DemandModel:
 
         out = df.copy()
         out["quantity_mean"] = mean
+        out["log_quantity_mean"] = (
+            ds["log_quantity"].mean(dim=("chain", "draw")).to_numpy()
+        )
         out["quantity_hdi_lower"] = lower
         out["quantity_hdi_upper"] = upper
         return out
@@ -1021,21 +1024,43 @@ class DemandModel:
         if random_seed is not None and "random_seed" not in fit_sample_kwargs:
             fit_sample_kwargs["random_seed"] = random_seed
         self.fit(train_df, **fit_sample_kwargs)
-        preds = self.predict(test_df, hdi_prob=hdi_prob, random_seed=random_seed)
+        from pypricing.diagnostics.fit import fit_metrics
 
-        y_true = test_df[self.panel_columns.quantity_col].to_numpy(dtype=np.float64)
-        y_pred = preds["quantity_mean"].to_numpy(dtype=np.float64)
-        rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-        lower = preds["quantity_hdi_lower"].to_numpy(dtype=np.float64)
-        upper = preds["quantity_hdi_upper"].to_numpy(dtype=np.float64)
-        hdi_coverage = float(np.mean((y_true >= lower) & (y_true <= upper)))
+        preds = self.predict(test_df, hdi_prob=hdi_prob, random_seed=random_seed)
+        overall = fit_metrics(
+            preds,
+            quantity_col=self.quantity_col,
+            quantity_floor=self.quantity_floor,
+        ).loc["overall"]
         return {
-            "rmse": rmse,
-            "hdi_coverage": hdi_coverage,
+            "rmse": float(overall["rmse"]),
+            "rmse_log": float(overall["rmse_log"]),
+            "bias_log": float(overall["bias_log"]),
+            "hdi_coverage": float(overall["hdi_coverage"]),
             "test_predictions": preds,
             "n_train": len(train_df),
             "n_test": len(test_df),
         }
+
+    def check_fit(
+        self,
+        df: pd.DataFrame | None = None,
+        *,
+        by: str | None = None,
+        hdi_prob: float = 0.94,
+        min_rows: int = 10,
+        random_seed: int | None = None,
+    ) -> pd.DataFrame:
+        from pypricing.diagnostics.fit import check_fit as _check_fit
+
+        return _check_fit(
+            self,
+            df,
+            by=by,
+            hdi_prob=hdi_prob,
+            min_rows=min_rows,
+            random_seed=random_seed,
+        )
 
     def optimize_prices(
         self,

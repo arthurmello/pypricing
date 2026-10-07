@@ -276,6 +276,40 @@ def test_fit_train_test_metrics():
     assert len(out["test_predictions"]) == out["n_test"]
 
 
+def test_check_fit_in_and_out_of_sample():
+    df = generate_mock_data(
+        n_periods=12,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    train_df, test_df = model.train_test_split(df, test_size=0.25)
+    model.fit(
+        train_df,
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+
+    in_sample = model.check_fit(random_seed=0, min_rows=1)
+    assert list(in_sample.index) == ["overall", "low", "mid", "high"]
+    assert in_sample.loc["overall", "n"] == len(train_df)
+
+    by_control = model.check_fit(by="control_1", random_seed=0, min_rows=1)
+    assert by_control.loc[["low", "mid", "high"], "n"].sum() == len(train_df)
+
+    oos = model.check_fit(test_df, random_seed=0, min_rows=1)
+    assert oos.loc["overall", "n"] == len(test_df)
+    assert oos.loc[["low", "mid", "high"], "n"].sum() == len(test_df)
+
+    with pytest.raises(ValueError, match="not found"):
+        model.check_fit(by="missing_col")
+
+
 def test_fit_sigmoid_smoke():
     df = generate_mock_data(
         n_periods=8,
