@@ -1064,6 +1064,15 @@ class DemandModel:
             self, hdi_prob=hdi_prob, compare_ols=compare_ols, **sample_kwargs
         )
 
+    def check_sensitivity(
+        self, *, q: float = 1.0, alpha: float = 0.05
+    ) -> pd.DataFrame:
+        from pypricing.diagnostics.sensitivity import (
+            check_sensitivity as _check_sensitivity,
+        )
+
+        return _check_sensitivity(self, q=q, alpha=alpha)
+
     def optimize_prices(
         self,
         price_bounds: dict[Any, tuple[float, float]] | pd.Series,

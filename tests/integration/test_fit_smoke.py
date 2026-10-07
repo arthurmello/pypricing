@@ -354,6 +354,34 @@ def test_check_instruments_requires_instruments():
         model.check_instruments()
 
 
+def test_check_sensitivity_per_sku_and_pooled():
+    df = generate_mock_data(
+        n_periods=20,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=100,
+        tune=100,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    out = model.check_sensitivity()
+
+    assert list(out.index) == [*model.sku_levels_, "pooled"]
+    assert list(out.columns) == ["estimate", "se", "t", "partial_r2", "rv", "rv_qa"]
+    assert ((out["rv"] >= out["rv_qa"]) & (out["rv_qa"] >= 0)).all()
+    posterior = model.idata.posterior["elasticity_sku"].mean(("chain", "draw"))
+    per_sku = out.loc[list(model.sku_levels_)]
+    gap = np.abs(per_sku["estimate"].to_numpy() - posterior.to_numpy())
+    assert (gap < 3 * per_sku["se"].to_numpy()).all()
+
+
 def test_check_fit_in_and_out_of_sample():
     df = generate_mock_data(
         n_periods=12,
