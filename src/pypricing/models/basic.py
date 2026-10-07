@@ -1062,6 +1062,15 @@ class DemandModel:
             random_seed=random_seed,
         )
 
+    def check_benchmarks(
+        self, *, extreme_threshold: float = 0.99
+    ) -> dict[str, pd.DataFrame | None]:
+        from pypricing.diagnostics.benchmarks import (
+            check_benchmarks as _check_benchmarks,
+        )
+
+        return _check_benchmarks(self, extreme_threshold=extreme_threshold)
+
     def optimize_prices(
         self,
         price_bounds: dict[Any, tuple[float, float]] | pd.Series,
