@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from pypricing.diagnostics import DiagnosticWarning
 from pypricing.posterior import get_elasticity_means
 
 if TYPE_CHECKING:
@@ -203,6 +204,7 @@ def check_instruments(
             f"Weak instruments: first-stage F = {first_stage['f']:.1f} "
             f"(< {WEAK_IV_F_THRESHOLD:.0f}). IV estimates will be noisy and "
             "pulled toward OLS.",
+            DiagnosticWarning,
             stacklevel=3,
         )
 
@@ -212,6 +214,7 @@ def check_instruments(
             f"Sargan test rejects (p = {overid['p_value']:.3f}): the instruments "
             "imply different elasticities, so at least one may affect demand "
             "other than through price.",
+            DiagnosticWarning,
             stacklevel=3,
         )
 

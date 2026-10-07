@@ -382,6 +382,28 @@ def test_check_sensitivity_per_sku_and_pooled():
     assert (gap < 3 * per_sku["se"].to_numpy()).all()
 
 
+def test_run_diagnostics_report_sections():
+    df = generate_mock_data(n_periods=12, n_skus=3, n_controls=1, random_state=0)
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=60,
+        tune=60,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    report = model.run_diagnostics(sensitivity=False)
+
+    assert "n_divergent" in report
+    assert "overall" in report.fit.index
+    assert report.benchmarks["own"] is not None
+    assert report.sensitivity is None
+    assert set(report.skipped) == {"sensitivity", "instruments", "falsification"}
+    assert "fit" in str(report)
+
+
 def test_check_fit_in_and_out_of_sample():
     df = generate_mock_data(
         n_periods=12,

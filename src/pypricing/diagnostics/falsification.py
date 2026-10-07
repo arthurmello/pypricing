@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from pypricing.data import PanelColumns
+from pypricing.diagnostics import DiagnosticWarning
 from pypricing.posterior import get_elasticity_means
 
 if TYPE_CHECKING:
@@ -94,6 +95,7 @@ def check_falsification(
             f"{hdi_prob:.0%} HDI [{lo:.3f}, {hi:.3f}] excludes 0). Check for "
             "unmeasured drivers of both price and demand, or forward-looking "
             "shoppers.",
+            DiagnosticWarning,
             stacklevel=3,
         )
 

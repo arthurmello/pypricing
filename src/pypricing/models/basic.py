@@ -8,7 +8,7 @@ from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import arviz as az
 import numpy as np
@@ -36,6 +36,9 @@ from pypricing.model_components.time_terms import (
     normalize_seasonality,
     seasonality_components_for_frequency,
 )
+
+if TYPE_CHECKING:
+    from pypricing.diagnostics.report import DiagnosticsReport
 
 try:
     _PKG_VERSION = pkg_version("pypricing")
@@ -551,16 +554,50 @@ class DemandModel:
         return az.summary(self.idata, var_names=var_names, **summary_kwargs)
 
     def run_diagnostics(
-        self, *, floor_censoring_threshold: float | None = None
-    ) -> dict[str, Any]:
-        """
+        self,
+        *,
+        fit: bool = True,
+        benchmarks: bool = True,
+        sensitivity: bool = True,
+        instruments: bool = True,
+        falsification: bool = False,
+        compare_ols: bool = False,
+        hdi_prob: float = 0.94,
+        floor_censoring_threshold: float | None = None,
+    ) -> DiagnosticsReport:
+        """Sampler health plus the selected model checks, as a printable report.
+
         Parameters
         ----------
+        fit, benchmarks, sensitivity, instruments
+            Toggle the fast checks (on by default). ``instruments`` is skipped
+            when the model has none.
+        falsification, compare_ols
+            Toggle the checks that refit the model (off by default).
+        hdi_prob
+            Interval width for the fit coverage and falsification checks.
         floor_censoring_threshold
             Overrides ``panel_columns.floor_censoring_warn_threshold`` for this
             call only, without needing to refit. ``None`` (default) uses the
             value configured on the model.
         """
+        from pypricing.diagnostics.report import run_diagnostics as _run_diagnostics
+
+        return _run_diagnostics(
+            self,
+            self._sampler_diagnostics(floor_censoring_threshold),
+            fit=fit,
+            benchmarks=benchmarks,
+            sensitivity=sensitivity,
+            instruments=instruments,
+            falsification=falsification,
+            compare_ols=compare_ols,
+            hdi_prob=hdi_prob,
+        )
+
+    def _sampler_diagnostics(
+        self, floor_censoring_threshold: float | None = None
+    ) -> dict[str, Any]:
         self._require_fitted()
         assert self.idata is not None
         out: dict[str, Any] = {}

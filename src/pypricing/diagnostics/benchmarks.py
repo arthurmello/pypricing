@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from pypricing.diagnostics import DiagnosticWarning
+
 if TYPE_CHECKING:
     from pypricing.models.basic import DemandModel
 
@@ -99,11 +101,13 @@ def _warn(out: pd.DataFrame, extreme_threshold: float) -> None:
         warnings.warn(
             f"{len(extreme)} SKU(s) more elastic than {extreme_threshold:.0%} of "
             f"published estimates: {extreme}",
+            DiagnosticWarning,
             stacklevel=3,
         )
     positive = out.index[out["positive"]].tolist()
     if positive:
         warnings.warn(
             f"{len(positive)} SKU(s) with positive own-price elasticity: {positive}",
+            DiagnosticWarning,
             stacklevel=3,
         )
