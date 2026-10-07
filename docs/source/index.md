@@ -25,6 +25,7 @@ print(model.fit_summary().head())
 models
 temporality
 identification
+diagnostics
 priors
 workflows
 optimization
