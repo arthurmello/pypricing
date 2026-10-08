@@ -12,7 +12,7 @@ from pypricing import (
     SigmoidSaturationDemandModel,
     generate_mock_data,
 )
-from pypricing.model_components.iv_terms import (
+from pypricing.diagnostics.identification import (
     WEAK_IV_F_THRESHOLD,
     first_stage_partial_f,
 )

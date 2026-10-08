@@ -276,6 +276,168 @@ def test_fit_train_test_metrics():
     assert len(out["test_predictions"]) == out["n_test"]
 
 
+def test_check_falsification_returns_lead_summary():
+    df = generate_mock_data(
+        n_periods=10,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    sample_kw = dict(
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    model.fit(df, **sample_kw)
+    out = model.check_falsification()
+    explicit = model.check_falsification(**sample_kw)
+    assert out["lead_coef_mean"] == pytest.approx(explicit["lead_coef_mean"])
+
+    lo, hi = out["lead_coef_hdi"]
+    assert lo <= out["lead_coef_mean"] <= hi
+    assert out["n"] < len(df)
+    assert list(out["elasticity"].columns) == ["baseline", "with_lead", "shift"]
+    assert len(out["elasticity"]) == 3
+    assert model.control_names_ == ("control_1",)
+
+
+def test_check_instruments_reports_all_sections():
+    df = generate_mock_data(
+        n_periods=12,
+        n_skus=3,
+        n_controls=1,
+        n_instruments=2,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    out = model.check_instruments()
+
+    assert out["first_stage"]["f"] > 0
+    assert out["overid"]["applicable"]
+    assert out["overid"]["n_instruments"] == 2
+    assert 0.0 <= out["overid"]["p_value"] <= 1.0
+    lo, hi = out["rho"]["hdi"]
+    assert lo <= out["rho"]["mean"] <= hi
+    assert list(out["elasticity"].columns) == ["iv", "ols", "shift"]
+    assert len(out["elasticity"]) == 3
+
+    no_ols = model.check_instruments(compare_ols=False)
+    assert no_ols["elasticity"] is None
+
+
+def test_check_instruments_requires_instruments():
+    df = generate_mock_data(n_periods=6, n_skus=2, random_state=0)
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=20,
+        tune=20,
+        chains=1,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    with pytest.raises(ValueError, match="no instruments"):
+        model.check_instruments()
+
+
+def test_check_sensitivity_per_sku_and_pooled():
+    df = generate_mock_data(
+        n_periods=20,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=100,
+        tune=100,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    out = model.check_sensitivity()
+
+    assert list(out.index) == [*model.sku_levels_, "pooled"]
+    assert list(out.columns) == ["estimate", "se", "t", "partial_r2", "rv", "rv_qa"]
+    assert ((out["rv"] >= out["rv_qa"]) & (out["rv_qa"] >= 0)).all()
+    posterior = model.idata.posterior["elasticity_sku"].mean(("chain", "draw"))
+    per_sku = out.loc[list(model.sku_levels_)]
+    gap = np.abs(per_sku["estimate"].to_numpy() - posterior.to_numpy())
+    assert (gap < 3 * per_sku["se"].to_numpy()).all()
+
+
+def test_run_diagnostics_report_sections():
+    df = generate_mock_data(n_periods=12, n_skus=3, n_controls=1, random_state=0)
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=60,
+        tune=60,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    report = model.run_diagnostics(sensitivity=False)
+
+    assert "n_divergent" in report
+    assert "overall" in report.fit.index
+    assert report.benchmarks["own"] is not None
+    assert report.sensitivity is None
+    assert set(report.skipped) == {"sensitivity", "instruments", "falsification"}
+    assert "fit" in str(report)
+
+
+def test_check_fit_in_and_out_of_sample():
+    df = generate_mock_data(
+        n_periods=12,
+        n_skus=3,
+        n_controls=1,
+        random_state=0,
+    )
+    model = LogLogDemandModel()
+    train_df, test_df = model.train_test_split(df, test_size=0.25)
+    model.fit(
+        train_df,
+        draws=40,
+        tune=40,
+        chains=2,
+        random_seed=0,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+
+    in_sample = model.check_fit(random_seed=0, min_rows=1)
+    assert list(in_sample.index) == ["overall", "low", "mid", "high"]
+    assert in_sample.loc["overall", "n"] == len(train_df)
+
+    by_control = model.check_fit(by="control_1", random_seed=0, min_rows=1)
+    assert by_control.loc[["low", "mid", "high"], "n"].sum() == len(train_df)
+
+    oos = model.check_fit(test_df, random_seed=0, min_rows=1)
+    assert oos.loc["overall", "n"] == len(test_df)
+    assert oos.loc[["low", "mid", "high"], "n"].sum() == len(test_df)
+
+    with pytest.raises(ValueError, match="not found"):
+        model.check_fit(by="missing_col")
+
+
 def test_fit_sigmoid_smoke():
     df = generate_mock_data(
         n_periods=8,

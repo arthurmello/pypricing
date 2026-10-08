@@ -28,8 +28,11 @@ residual.
 
 - holds out the **last** fraction of unique periods (avoids time leakage)
 - fits on train, predicts on test
-- returns `rmse` on `quantity_mean`, `hdi_coverage` (fraction of true
-  quantities inside the predicted HDI), and `test_predictions`
+- returns `rmse` on `quantity_mean`, `rmse_log` and `bias_log` (relative error
+  and bias on the log scale), `hdi_coverage` (fraction of true quantities
+  inside the predicted HDI), and `test_predictions`
+
+For fit by price range, see [Diagnostics](diagnostics.md#model-fit).
 
 ## Save / load
 
