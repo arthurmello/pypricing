@@ -23,7 +23,9 @@ $$
 
 $\varepsilon = -1.5$ means a 1% higher price cuts expected quantity by about
 1.5%. The three curves below are different ways to let that slope depend on
-price. Cross-price effects (one SKU's price on another's quantity) are
+price. With a discount column, $\varepsilon$ is the **regular-price** elasticity
+and temporary discounts get their own coefficient; see [Promotions](promotions.md).
+Cross-price effects (one SKU's price on another's quantity) are
 separate; see [Hierarchy and cross-elasticity](hierarchy.md).
 
 Further reading:

@@ -25,9 +25,12 @@ from pypricing.model_components.cross_elasticity import (
 )
 from pypricing.data import CrossPairIndex, PanelColumns, PricePanelData
 from pypricing.data.price_panel import (
+    decompose_log_price,
     floor_censored_fraction,
     parse_period_index,
     period_to_t_years,
+    read_discount_fraction,
+    skus_without_variation,
 )
 from pypricing.model_components.time_terms import (
     TrendKind,
@@ -95,7 +98,11 @@ class DemandModel:
         Column names and panel knobs (SKU / price / quantity, controls,
         instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
         ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
-        IV on the log-demand model classes.
+        IV on the log-demand model classes. ``discount_col``, when set, splits
+        own-price response into a regular-price elasticity (``elasticity_sku``,
+        the curve at regular price) and a log-linear promo elasticity
+        (``promo_elasticity_sku``). ``predict`` then requires that column;
+        ``price`` stays the price actually paid.
     cross_elasticity
         If set, add directed cross-price effects (``CrossElasticitySpec``). Requires
         a balanced market cell per ``period`` (and ``region`` when used).
@@ -152,6 +159,8 @@ class DemandModel:
         self.cross_pairs_: CrossPairIndex | None = None
         self.t0_: pd.Timestamp | None = None
         self.seasonality_: tuple[str, ...] | None = None
+        self.no_discount_variation_skus_: list[Any] = []
+        self.no_regular_price_variation_skus_: list[Any] = []
         self.fit_kwargs_: dict[str, Any] = {}
         self._validate_configuration()
 
@@ -228,7 +237,9 @@ class DemandModel:
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
+        log_discount_index: np.ndarray | None = None,
     ) -> np.ndarray:
+        """Mean log-quantity. ``log_price`` is log regular price when discounts are used."""
         pass
 
     def _uses_calendar(self) -> bool:
@@ -284,6 +295,7 @@ class DemandModel:
                 {
                     "sku_col": cols.sku_col,
                     "price_col": cols.price_col,
+                    "discount_col": cols.discount_col,
                     "quantity_col": cols.quantity_col,
                     "quantity_floor": cols.quantity_floor,
                     "control_columns": cols.control_columns,
@@ -351,6 +363,7 @@ class DemandModel:
         panel_columns = PanelColumns(
             sku_col=pc["sku_col"],
             price_col=pc["price_col"],
+            discount_col=pc.get("discount_col"),
             quantity_col=pc["quantity_col"],
             quantity_floor=float(pc["quantity_floor"]),
             control_columns=tuple(control_raw) if control_raw is not None else None,
@@ -473,6 +486,8 @@ class DemandModel:
                     stacklevel=2,
                 )
 
+        self._warn_unidentified_prices(panel)
+
         if self.cross_elasticity is not None:
             cross_pairs = enumerate_cross_pairs(
                 mode=self.cross_elasticity.mode,
@@ -492,7 +507,7 @@ class DemandModel:
         mid = np.empty(panel.n_skus, dtype=np.float64)
         for sku_idx in range(panel.n_skus):
             mask = panel.obs_sku_idx == sku_idx
-            mid[sku_idx] = float(np.median(panel.log_price[mask]))
+            mid[sku_idx] = float(np.median(panel.log_regular_price[mask]))
         self.log_price_midpoint_sku_ = mid
 
         self.model = self._build_pymc_model(panel)
@@ -500,6 +515,44 @@ class DemandModel:
         self.control_names_ = panel.control_names
         self.iv_names_ = panel.iv_names
         self.data = data.copy()
+
+    def _warn_unidentified_prices(self, panel: PricePanelData) -> None:
+        regular = skus_without_variation(
+            panel.log_regular_price, panel.obs_sku_idx, panel.sku_levels
+        )
+        if panel.log_discount_index is None:
+            discount: list[Any] = []
+        else:
+            discount = skus_without_variation(
+                panel.log_discount_index, panel.obs_sku_idx, panel.sku_levels
+            )
+        self.no_regular_price_variation_skus_ = regular
+        self.no_discount_variation_skus_ = discount
+        if discount:
+            assert panel.log_discount_index is not None
+            all_zero = True
+            for i, sku in enumerate(panel.sku_levels):
+                if sku not in discount:
+                    continue
+                column = panel.log_discount_index[panel.obs_sku_idx == i]
+                if float(np.max(np.abs(column))) > 1e-8:
+                    all_zero = False
+                    break
+            reason = (
+                "discount = 0 on every row" if all_zero else "no discount variation"
+            )
+            warnings.warn(
+                f"SKU(s) {discount} have {reason}; promo_elasticity_sku is "
+                "prior-only for them.",
+                stacklevel=3,
+            )
+        if regular:
+            warnings.warn(
+                f"SKU(s) {regular} have a regular price that never changes; "
+                "elasticity_sku is prior-only for them. Use group_columns to pool "
+                "price variation across SKUs.",
+                stacklevel=3,
+            )
 
     def build_from_idata(self, idata: az.InferenceData) -> None:
         if not hasattr(idata, "fit_data"):
@@ -537,6 +590,7 @@ class DemandModel:
             candidates = [
                 "alpha_sku",
                 "elasticity_sku",
+                "promo_elasticity_sku",
                 "curvature_sku",
                 "sigma",
                 "beta_control",
@@ -628,6 +682,10 @@ class DemandModel:
             }
         else:
             out["floor_censored_skus"] = {}
+        out["no_discount_variation_skus"] = list(self.no_discount_variation_skus_)
+        out["no_regular_price_variation_skus"] = list(
+            self.no_regular_price_variation_skus_
+        )
         from pypricing.diagnostics.identification import iv_diagnostics
 
         out.update(iv_diagnostics(self))
@@ -771,7 +829,12 @@ class DemandModel:
 
     def _build_prediction_features(
         self, df: pd.DataFrame
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """Log regular price, SKU index, controls, and log discount index.
+
+        ``price`` is the price actually paid. When the model was fit with
+        ``discount_col``, that column is required.
+        """
         self._require_fitted()
         assert self.sku_levels_ is not None
         if self.panel_columns.sku_col not in df.columns:
@@ -779,6 +842,12 @@ class DemandModel:
         if self.panel_columns.price_col not in df.columns:
             raise ValueError(
                 f"Missing required column: {self.panel_columns.price_col!r}"
+            )
+        discount_col = self.panel_columns.discount_col
+        if discount_col is not None and discount_col not in df.columns:
+            raise ValueError(
+                f"Model was fit with discount column {discount_col!r}; "
+                "prediction data must include it. `price` is the price actually paid."
             )
 
         sku_values = df[self.panel_columns.sku_col]
@@ -794,7 +863,15 @@ class DemandModel:
         price = df[self.panel_columns.price_col].to_numpy(dtype=np.float64)
         if (price <= 0).any():
             raise ValueError("price must be strictly positive for log transform")
-        log_price = np.log(price)
+        discount = None
+        if discount_col is not None:
+            discount = read_discount_fraction(
+                df,
+                discount_col=discount_col,
+                sku_col=self.panel_columns.sku_col,
+                price_col=self.panel_columns.price_col,
+            )
+        _log_paid, log_regular, log_discount_index = decompose_log_price(price, discount)
 
         if self.control_names_:
             missing = [c for c in self.control_names_ if c not in df.columns]
@@ -805,8 +882,8 @@ class DemandModel:
             X = df.loc[:, list(self.control_names_)].to_numpy(dtype=np.float64)
             if np.isnan(X).any():
                 raise ValueError("NaN in control columns are not allowed")
-            return log_price, obs_sku_idx, X
-        return log_price, obs_sku_idx, None
+            return log_regular, obs_sku_idx, X, log_discount_index
+        return log_regular, obs_sku_idx, None, log_discount_index
 
     def _resolve_seasonality(
         self, period_index: pd.DatetimeIndex | None
@@ -923,7 +1000,9 @@ class DemandModel:
         self._require_fitted()
         assert self.idata is not None
 
-        log_price, obs_sku_idx, X_control = self._build_prediction_features(df)
+        log_price, obs_sku_idx, X_control, log_discount_index = (
+            self._build_prediction_features(df)
+        )
         X_cross = self._cross_matrix_for_frame(df, obs_sku_idx)
         t_years = self._t_years_for_frame(df)
         X_season = self._season_features_for_frame(df)
@@ -937,6 +1016,7 @@ class DemandModel:
             X_cross=X_cross,
             t_years=t_years,
             X_season=X_season,
+            log_discount_index=log_discount_index,
         )
 
         rng = np.random.default_rng(random_seed)
@@ -1136,6 +1216,11 @@ class DemandModel:
         hdi_prob: float = 0.9,
         return_draws: bool = False,
     ) -> pd.DataFrame | tuple[pd.DataFrame, xr.DataArray]:
+        """Quantity change from scaling regular price by ``price_multiplier``.
+
+        Log-log only. The discount fraction is held fixed; ``elasticity_sku``
+        is the regular-price elasticity.
+        """
         from pypricing.posterior import (
             quantity_multiplier_posterior as _quantity_multiplier_posterior,
             summarize_quantity_multiplier_by_sku as _quantity_multiplier_summary,

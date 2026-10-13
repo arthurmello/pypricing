@@ -15,7 +15,8 @@ from pypricing.model_components.priors import (
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.iv_terms import get_control_function_term
-from pypricing.model_components.posterior_mu import add_controls_and_cross
+from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
+from pypricing.model_components.promo_terms import get_promo_term
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
 
 
@@ -24,11 +25,14 @@ class LogLogDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku + elasticity_sku * log(P) + controls + cross + trend + season``
+    ``mu = alpha_sku + elasticity_sku * log(R) + promo_elasticity_sku * log(1 - d) + controls + cross + trend + season``
     (plus a control-function residual when instruments are present).
 
-    ``elasticity_sku`` is own-price elasticity (e.g. ``-1.5`` ≈ 1% price up → 1.5%
-    quantity down in expectation). Best as a simple constant-elasticity baseline.
+    ``R`` is the regular price. With ``discount_col`` unset, ``R`` is the paid
+    price and the promo term is omitted. ``elasticity_sku`` is the regular-price
+    elasticity (e.g. ``-1.5`` ≈ 1% higher regular price → 1.5% less quantity).
+    ``promo_elasticity_sku`` is log-linear in the discount index. Best as a
+    simple constant-elasticity baseline.
     Quantity-multiplier helpers apply only to this model.
 
     Optional control-function IV: pass ``iv_columns`` (or ``iv_*`` columns) on
@@ -43,7 +47,7 @@ class LogLogDemandModel(DemandModel):
     def _build_pymc_model(self, data: PricePanelData) -> pm.Model:
         coords = data.coords()
         obs_sku = pt.constant(data.obs_sku_idx)
-        log_p = pt.constant(data.log_price)
+        log_p = pt.constant(data.log_regular_price)
 
         with pm.Model(coords=coords) as model:
             alpha_sku = get_sku_effect(
@@ -87,6 +91,8 @@ class LogLogDemandModel(DemandModel):
                 + season_term
                 + control_function_term
             )
+            if data.log_discount_index is not None:
+                mu = mu + get_promo_term(self.model_config, data)
             pm.Normal(
                 "log_quantity",
                 mu=mu,
@@ -106,6 +112,7 @@ class LogLogDemandModel(DemandModel):
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
+        log_discount_index: np.ndarray | None = None,
     ) -> np.ndarray:
         alpha = posterior["alpha_sku"].values
         elasticity = posterior["elasticity_sku"].values
@@ -113,6 +120,7 @@ class LogLogDemandModel(DemandModel):
             alpha[:, :, obs_sku_idx]
             + elasticity[:, :, obs_sku_idx] * log_price[None, None, :]
         )
+        mu = add_promo(mu, posterior, log_discount_index, obs_sku_idx)
         return add_controls_and_cross(
             mu=mu,
             posterior=posterior,

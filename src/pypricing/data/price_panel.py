@@ -90,6 +90,14 @@ class PanelColumns:
 
     sku_col: str = "sku"
     price_col: str = "price"
+    discount_col: str | None = None
+    """Optional column of discounts as a fraction of the regular price.
+
+    ``None`` (default) keeps a single price elasticity. ``0.2`` means 20% off
+    the regular price; ``price`` remains the price actually paid. Regular price
+    is ``price / (1 - discount)``. Fixed-amount discounts and multibuys must be
+    converted to this fraction before fitting.
+    """
     quantity_col: str = "quantity"
     quantity_floor: float = 1.0
     control_columns: tuple[str, ...] | None = None
@@ -134,6 +142,170 @@ def _resolve_feature_columns(
     if overlap:
         raise ValueError(f"{label} must not overlap sku/price/quantity: {overlap}")
     return cols
+
+
+def decompose_log_price(
+    price: np.ndarray,
+    discount: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Return log paid price, log regular price, and the log discount index.
+
+    Regular price is ``price / (1 - discount)``. With ``discount is None`` the
+    log regular price is the log paid price (the same array) and the index is
+    ``None``.
+    """
+    log_paid = np.log(np.asarray(price, dtype=np.float64))
+    if discount is None:
+        return log_paid, log_paid, None
+    log_index = np.log(1.0 - np.asarray(discount, dtype=np.float64))
+    return log_paid, log_paid - log_index, log_index
+
+
+def skus_without_variation(
+    values: np.ndarray,
+    obs_sku_idx: np.ndarray,
+    sku_levels: pd.Index,
+    *,
+    atol: float = 1e-8,
+) -> list[Any]:
+    """SKU labels whose ``values`` do not change across observations."""
+    values = np.asarray(values, dtype=np.float64)
+    found: list[Any] = []
+    for i, sku in enumerate(sku_levels):
+        column = values[np.asarray(obs_sku_idx) == i]
+        if column.size == 0:
+            continue
+        if float(np.max(column) - np.min(column)) <= atol:
+            found.append(sku)
+    return found
+
+
+def _example_rows(df: pd.DataFrame, mask: np.ndarray, columns: list[str]) -> str:
+    show = [c for c in columns if c in df.columns]
+    idx = np.flatnonzero(np.asarray(mask, dtype=bool))[:3]
+    if len(idx) == 0:
+        return df.loc[:, show].head(3).to_string(index=False)
+    return df.iloc[idx].loc[:, show].to_string(index=False)
+
+
+def read_discount_fraction(
+    df: pd.DataFrame,
+    *,
+    discount_col: str,
+    sku_col: str,
+    price_col: str,
+) -> np.ndarray:
+    """Numeric discount fractions in ``[0, 1)``, with example rows on failure."""
+    if discount_col not in df.columns:
+        raise ValueError(f"Missing discount column: {discount_col!r}")
+    series = df[discount_col]
+    example_cols = [sku_col, price_col, discount_col]
+    if not pd.api.types.is_numeric_dtype(series):
+        raise ValueError(
+            f"{discount_col!r} must be numeric (a fraction of the regular price, "
+            f"0.2 = 20% off). Example rows:\n"
+            f"{_example_rows(df, np.ones(len(df), dtype=bool), example_cols)}"
+        )
+    values = series.to_numpy(dtype=np.float64)
+    if not np.isfinite(values).all():
+        bad = ~np.isfinite(values)
+        raise ValueError(
+            f"NaN in {discount_col!r} are not allowed. Example rows:\n"
+            f"{_example_rows(df, bad, example_cols)}"
+        )
+    if (values < 0).any():
+        raise ValueError(
+            f"{discount_col!r} must be >= 0 (fraction of the regular price). "
+            f"Example rows:\n{_example_rows(df, values < 0, example_cols)}"
+        )
+    if (values >= 1).any():
+        raise ValueError(
+            f"{discount_col!r} must be < 1 (fraction of the regular price). "
+            f"Example rows:\n{_example_rows(df, values >= 1, example_cols)}"
+        )
+    return values
+
+
+def apply_discount(
+    df: pd.DataFrame,
+    discount: float | np.ndarray,
+    *,
+    panel_columns: PanelColumns | None = None,
+) -> pd.DataFrame:
+    """Set a discount and scale ``price`` off the implied regular price.
+
+    Regular price is ``price / (1 - discount)`` when the discount column is
+    already present, and the current ``price`` otherwise (no promo yet). The
+    returned frame keeps ``price == regular * (1 - new_discount)``.
+
+    ``discount`` is a fraction of the regular price (``0.2`` = 20% off) and
+    must lie in ``[0, 1)``. A scalar applies to every row. When
+    ``panel_columns.discount_col`` is unset, the column written is
+    ``discount_rate``.
+    """
+    cols = panel_columns or PanelColumns()
+    discount_col = cols.discount_col or "discount_rate"
+    price_col = cols.price_col
+    if price_col not in df.columns:
+        raise ValueError(f"Missing price column: {price_col!r}")
+
+    out = df.copy()
+    new_discount = np.asarray(discount, dtype=np.float64)
+    if new_discount.ndim == 0:
+        new_discount = np.full(len(out), float(new_discount))
+    elif new_discount.shape != (len(out),):
+        raise ValueError(
+            f"discount length {new_discount.shape[0]} does not match frame length {len(out)}"
+        )
+    if not np.isfinite(new_discount).all() or (new_discount < 0).any() or (new_discount >= 1).any():
+        raise ValueError("discount must be finite and in [0, 1)")
+
+    price = out[price_col].to_numpy(dtype=np.float64)
+    if discount_col in out.columns:
+        current = out[discount_col].to_numpy(dtype=np.float64)
+        if not np.isfinite(current).all() or (current < 0).any() or (current >= 1).any():
+            raise ValueError(
+                f"Existing {discount_col!r} must be finite and in [0, 1) "
+                "so the regular price is defined"
+            )
+        regular = price / (1.0 - current)
+    else:
+        regular = price
+    out[price_col] = regular * (1.0 - new_discount)
+    out[discount_col] = new_discount
+    return out
+
+
+def _read_panel_discount(
+    df: pd.DataFrame,
+    cols: PanelColumns,
+    *,
+    control_columns: tuple[str, ...],
+    iv_columns: tuple[str, ...],
+    group_columns: tuple[str, ...] | None,
+) -> np.ndarray | None:
+    discount_col = cols.discount_col
+    if discount_col is None:
+        return None
+    if discount_col not in df.columns:
+        raise ValueError(f"Missing discount column: {discount_col!r}")
+    overlaps: list[str] = []
+    if discount_col in control_columns:
+        overlaps.append("control_columns")
+    if discount_col in iv_columns:
+        overlaps.append("iv_columns")
+    if group_columns is not None and discount_col in group_columns:
+        overlaps.append("group_columns")
+    if overlaps:
+        raise ValueError(
+            f"discount_col {discount_col!r} must not overlap {', '.join(overlaps)}"
+        )
+    return read_discount_fraction(
+        df,
+        discount_col=discount_col,
+        sku_col=cols.sku_col,
+        price_col=cols.price_col,
+    )
 
 
 def floor_censored_fraction(
@@ -267,6 +439,12 @@ class PricePanelData:
 
     Expects **price** and **quantity** in natural units; builds ``log_price`` and
     ``log_quantity`` internally for the log-log likelihood.
+
+    ``log_price`` is the price actually paid (also the competitor price in
+    cross-price terms). When ``discount_col`` is set, ``log_regular_price`` is
+    ``log(price) - log(1 - discount)`` and ``log_discount_index`` is
+    ``log(1 - discount)``. Without a discount column those are the paid log
+    price and ``None``.
     """
 
     log_price: np.ndarray
@@ -279,6 +457,10 @@ class PricePanelData:
     iv_matrix: np.ndarray
     iv_names: tuple[str, ...]
     n_obs: int
+    log_regular_price: np.ndarray
+    """Log regular price. Equal to ``log_price`` when there is no discount column."""
+    log_discount_index: np.ndarray | None = None
+    """``log(1 - discount)``; ``None`` when the panel has no discount column."""
     hierarchy: HierarchyIndex | None = None
     """Present when ``PanelColumns.group_columns`` were set at build time."""
     cross_pair_log_price_matrix: np.ndarray | None = None
@@ -317,6 +499,8 @@ class PricePanelData:
             ``log(max(quantity, quantity_floor))``. ``group_columns`` are optional
             hierarchy columns, coarse → fine, constant within each SKU.
             ``iv_columns`` are optional instruments (``None`` auto-detects ``iv_*``).
+            ``discount_col``, when set, is a fraction of the regular price in
+            ``[0, 1)`` (``0.2`` = 20% off). ``price`` stays the price paid.
         parse_period
             If ``True``, require ``period_col`` and convert it with
             :func:`parse_period_index`. If ``False`` (default), attach
@@ -382,6 +566,14 @@ class PricePanelData:
                 )
             extra = [*group_columns, *extra]
 
+        discount = _read_panel_discount(
+            df,
+            cols,
+            control_columns=control_columns,
+            iv_columns=iv_columns,
+            group_columns=group_columns,
+        )
+
         if cols.period_col in df.columns:
             dup_key = [sku_col, cols.period_col]
             if cols.region_col is not None and cols.region_col in df.columns:
@@ -410,7 +602,9 @@ class PricePanelData:
             raise ValueError("price must be strictly positive for log transform")
         if (quantity < 0).any():
             raise ValueError("quantity must be non-negative")
-        log_price = np.log(price)
+        log_price, log_regular_price, log_discount_index = decompose_log_price(
+            price, discount
+        )
         log_quantity = np.log(np.maximum(quantity, quantity_floor))
 
         if len(control_columns) and sub[list(control_columns)].isna().any().any():
@@ -465,6 +659,8 @@ class PricePanelData:
             iv_matrix=iv_matrix,
             iv_names=tuple(iv_columns),
             n_obs=int(len(sub)),
+            log_regular_price=log_regular_price,
+            log_discount_index=log_discount_index,
             hierarchy=hierarchy,
             period_index=period_index,
         )

@@ -2,6 +2,9 @@ from typing import Any
 
 DEFAULT_ELASTICITY_MU = -2.6
 DEFAULT_ELASTICITY_SIGMA = 1.5
+# Bijmolt, van Heerde, and Pieters (2005), Table 2 Panel B: short-term promo mean.
+DEFAULT_PROMO_ELASTICITY_MU = -3.5
+DEFAULT_PROMO_ELASTICITY_SIGMA = 1.5
 
 
 def resolve_prior(

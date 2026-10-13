@@ -31,6 +31,7 @@ model = QuadraticLogDemandModel(
 
 - `alpha_sku ~ Normal(mu=6, sigma=2)`
 - `elasticity_sku ~ Normal(mu=-2.6, sigma=1.5)`
+- `promo_elasticity_sku ~ Normal(mu=-3.5, sigma=1.5)` (only with `discount_col`)
 - `sigma ~ HalfNormal(sigma=0.5)`
 - `beta_control ~ Normal(mu=0, sigma=0.5)` (if controls exist)
 - `pi ~ Normal(mu=0, sigma=1)` / `rho ~ Normal(mu=0, sigma=1)` /
@@ -57,3 +58,11 @@ variation shrink toward that bulk instead of toward −1.
 
 On a hierarchical panel the location prior is `mu_elasticity`, with the same
 `kwargs`.
+
+## Why -3.5 for promotions
+
+`promo_elasticity_sku` uses the short-term promotional mean in the same paper,
+Table 2 Panel B (p. 150): mean promo elasticity −3.63, against −2.36 for the
+actual price. −3.5 is that promo average, rounded, with the same `sigma=1.5`.
+The promo term is log-linear because discounts sit in a narrow band. With
+`group_columns`, the location prior is `mu_promo_elasticity`.

@@ -12,4 +12,5 @@ quadratic
 sigmoid
 hierarchical
 cross_elasticity
+promotions
 ```

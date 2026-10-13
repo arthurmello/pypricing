@@ -25,12 +25,18 @@ def get_control_function_term(
     t0: Any,
     seasonality_components: tuple[str, ...] | None,
 ) -> Any:
-    """Price equation residual times shared ``rho``; 0.0 when there are no instruments."""
+    """Price equation residual times shared ``rho``; 0.0 when there are no instruments.
+
+    The outcome is log regular price (equal to log paid price when the panel has
+    no discount column). The discount index is not instrumented: temporary
+    discounts are assumed exogenous and enter demand only through
+    ``promo_elasticity_sku``.
+    """
     if data.n_iv == 0:
         return 0.0
 
     obs_sku = pt.constant(data.obs_sku_idx)
-    log_p = pt.constant(data.log_price)
+    log_p = pt.constant(data.log_regular_price)
 
     alpha_price_sku = get_sku_effect(
         "alpha_price",
@@ -75,7 +81,9 @@ def get_control_function_term(
         default_dist=pm.HalfNormal,
         default_kwargs={"sigma": 0.5},
     )
-    pm.Normal("obs_price", mu=mu_price, sigma=sigma_price, observed=data.log_price)
+    pm.Normal(
+        "obs_price", mu=mu_price, sigma=sigma_price, observed=data.log_regular_price
+    )
 
     residual = log_p - mu_price
     rho = resolve_prior(

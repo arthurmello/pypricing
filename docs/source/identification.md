@@ -66,6 +66,12 @@ for one endogenous price. It is not a Stock–Yogo critical value. See
 [Diagnostics](diagnostics.md#instruments) for how to read all the instrument
 checks.
 
+With a discount column the first stage is for **log regular price**,
+$\log R = \log P - \log(1-d)$, not the price actually paid. The discount
+index $\log(1-d)$ is treated as exogenous: it is not instrumented, and
+`promo_elasticity_sku` is estimated from discount variation directly. That
+assumes temporary discounts are not set in response to the demand shock.
+
 {meth}`~pypricing.DemandModel.predict` and
 {func}`~pypricing.optimize_prices` use the structural demand curve (control
 residual set to 0). The IV correction is for **estimation** only.

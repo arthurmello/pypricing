@@ -45,6 +45,10 @@ def mean_revenue_at_price(
     posterior = model.idata.posterior
     t_years = model._t_years_for_counterfactual(1, at_period)
     X_season = model._season_features_for_counterfactual(1, at_period)
+    # Regular price at discount 0: the promo index is zero, so paid price = price.
+    log_discount_index = None
+    if model.panel_columns.discount_col is not None:
+        log_discount_index = np.zeros(1, dtype=np.float64)
     mu = model.compute_mu_from_posterior(
         posterior=posterior,
         log_price=np.array([log_p], dtype=np.float64),
@@ -52,6 +56,7 @@ def mean_revenue_at_price(
         X_control=X_row,
         t_years=t_years,
         X_season=X_season,
+        log_discount_index=log_discount_index,
     )
     sigma = np.asarray(posterior["sigma"].values, dtype=np.float64).reshape(
         mu.shape[0], mu.shape[1]
@@ -207,12 +212,17 @@ def optimize_prices(
     minimize_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """
-    Maximize posterior mean expected revenue by choosing one price per SKU.
+    Maximize posterior mean expected revenue by choosing one regular price per SKU.
 
     Expected revenue on a draw is ``price * exp(mu + sigma**2 / 2)``. With
     independent per-SKU demand (no cross-price in the model), each SKU is a 1D
-    search on log-price inside its bounds. Not available when
+    search on log regular price inside its bounds. Not available when
     ``cross_elasticity`` is set on the model.
+
+    When the model was fit with a discount column, the search sets the discount
+    to 0 and returns that regular price. Temporary discounts are not chosen
+    here; ``promo_elasticity_sku`` is for those, and this optimum is the
+    regular price.
 
     Parameters
     ----------
@@ -238,10 +248,11 @@ def optimize_prices(
     Returns
     -------
     pandas.DataFrame
-        Columns: ``optimal_price``, ``mean_revenue`` (posterior mean expected
-        revenue at that price for that SKU), ``at_bound`` (``"low"`` / ``"high"``
-        / ``None``, whether the optimum landed on the corresponding
-        ``price_bounds`` edge rather than an interior price); index = SKU.
+        Columns: ``optimal_price`` (regular price, discount 0), ``mean_revenue``
+        (posterior mean expected revenue at that price for that SKU),
+        ``at_bound`` (``"low"`` / ``"high"`` / ``None``, whether the optimum
+        landed on the corresponding ``price_bounds`` edge rather than an
+        interior price); index = SKU.
     """
     model._require_fitted()
     if getattr(model, "cross_elasticity", None) is not None:

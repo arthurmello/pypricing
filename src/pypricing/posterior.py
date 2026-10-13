@@ -34,7 +34,11 @@ def quantity_multiplier_posterior(
     *,
     price_multiplier: float,
 ) -> xr.DataArray:
-    """Posterior of ``price_multiplier ** elasticity`` (log-log only)."""
+    """Posterior of ``price_multiplier ** elasticity`` (log-log only).
+
+    ``elasticity_sku`` is the regular-price elasticity, so the multiplier
+    scales the regular price and holds the discount fraction fixed.
+    """
     model._require_fitted()
     assert model.idata is not None
     _require_log_log(model)

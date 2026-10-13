@@ -174,6 +174,16 @@ def _sampler_flags(sampler: dict[str, Any]) -> list[str]:
         flags.append(
             f"SKU(s) mostly at the quantity floor: {list(sampler['floor_censored_skus'])}."
         )
+    if sampler.get("no_discount_variation_skus"):
+        flags.append(
+            "SKU(s) with no discount variation (promo_elasticity_sku is prior-only): "
+            f"{sampler['no_discount_variation_skus']}."
+        )
+    if sampler.get("no_regular_price_variation_skus"):
+        flags.append(
+            "SKU(s) with no regular-price variation (elasticity_sku is prior-only; "
+            f"pool with group_columns): {sampler['no_regular_price_variation_skus']}."
+        )
     return flags
 
 

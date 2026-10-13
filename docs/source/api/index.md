@@ -20,4 +20,5 @@ Public symbols re-exported from {mod}`pypricing`.
    CrossElasticitySpec
    generate_mock_data
    optimize_prices
+   apply_discount
 ```

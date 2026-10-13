@@ -131,9 +131,21 @@ def first_stage_exogenous(model: DemandModel) -> np.ndarray:
 
 
 def _instruments_and_log_price(model: DemandModel) -> tuple[np.ndarray, np.ndarray]:
+    """Instruments and log regular price (log paid price when there is no discount).
+
+    The control function instruments regular price. The discount index is treated
+    as exogenous and is not part of this first stage.
+    """
+    from pypricing.data.price_panel import decompose_log_price
+
     instruments = model.data.loc[:, list(model.iv_names_)].to_numpy(dtype=np.float64)
-    log_price = np.log(model.data[model.price_col].to_numpy(dtype=np.float64))
-    return instruments, log_price
+    price = model.data[model.price_col].to_numpy(dtype=np.float64)
+    discount_col = model.panel_columns.discount_col
+    discount = None
+    if discount_col is not None:
+        discount = model.data[discount_col].to_numpy(dtype=np.float64)
+    _log_paid, log_regular, _log_index = decompose_log_price(price, discount)
+    return instruments, log_regular
 
 
 def iv_diagnostics(model: DemandModel, *, hdi_prob: float = 0.9) -> dict[str, Any]:
