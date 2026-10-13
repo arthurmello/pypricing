@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="pypricing" width="280">
+  <img src="logo.png" alt="pypricing" width="170">
 </p>
 
 # pypricing
