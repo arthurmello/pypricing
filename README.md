@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="pypricing" width="280">
+</p>
+
 # pypricing
 
 Bayesian log-demand pricing analytics with PyMC for long-format panels (one row
