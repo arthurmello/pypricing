@@ -1077,13 +1077,14 @@ class DemandModel:
         periods = pd.unique(df[period_col])
         if len(periods) < 2:
             raise ValueError("Need at least 2 unique periods for a train/test split")
+        # Keep the original period values. np.sort(...).tolist() turns datetimes
+        # into integer nanoseconds, and isin then matches nothing.
         try:
-            periods_sorted = np.sort(periods)
-        except Exception:
-            periods_sorted = np.array(sorted(periods.tolist()), dtype=object)
+            periods_sorted = pd.Index(periods).sort_values()
+        except TypeError:
+            periods_sorted = pd.Index(sorted(periods.tolist()))
         n_test_periods = max(1, int(np.ceil(test_size * len(periods_sorted))))
-        test_periods = set(periods_sorted[-n_test_periods:].tolist())
-        is_test = df[period_col].isin(test_periods)
+        is_test = df[period_col].isin(periods_sorted[-n_test_periods:])
         return df.loc[~is_test].copy(), df.loc[is_test].copy()
 
     def fit_train_test(
