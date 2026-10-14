@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="pypricing" width="170">
+</p>
+
 # pypricing
 
 Bayesian log-demand pricing analytics with PyMC for long-format panels (one row
@@ -44,11 +48,15 @@ print(model.predict(df_scenario, hdi_prob=0.9, random_seed=123).head())
 `fit(df)` expects level-scale columns:
 
 - **Required:** `sku`, `price` (strictly positive), `quantity` (non-negative)
-- **Optional:** `control_*`, `iv_*`, hierarchy via `PanelColumns(group_columns=...)`,
-  `period` / `region` (datetime `period` required for `trend` / `seasonality`)
+- **Optional:** `control_*`, `iv_*`, `discount_rate` (fraction off the regular
+  price; `price` stays the price paid), hierarchy via
+  `PanelColumns(group_columns=...)`, `period` / `region` (datetime `period`
+  required for `trend` / `seasonality`)
 
 Column names are configurable via `PanelColumns`. Internally the model uses
 `log(price)` and `log(max(quantity, quantity_floor))` (default floor `1.0`).
+With `PanelColumns(discount_col="discount_rate")`, regular-price and promo
+elasticities are estimated separately. See the promotions guide.
 
 ## When to use pypricing (and when not to use it)
 pypricing assumes products have posted prices that changed over time, and you observe the units sold at each price.

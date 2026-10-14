@@ -23,8 +23,10 @@ print(model.fit_summary().head())
 :maxdepth: 1
 
 models
+promotions
 temporality
 identification
+diagnostics
 priors
 workflows
 optimization

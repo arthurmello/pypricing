@@ -106,6 +106,9 @@ def _sku_price_grid_predictions(
         assert controls is not None
         for c in model.control_names_:
             df_pred[c] = float(controls[c])
+    if model.panel_columns.discount_col:
+        # Response curves are regular price: discount 0, so paid price equals it.
+        df_pred[model.panel_columns.discount_col] = 0.0
     if model._uses_calendar():
         ts = (
             pd.Timestamp(at_period)
@@ -148,6 +151,9 @@ def _posterior_local_elasticity(
     else:
         h = np.full_like(log_price, float(fd_step))
 
+    log_discount_index = None
+    if model.panel_columns.discount_col is not None:
+        log_discount_index = np.zeros(log_price.shape[0], dtype=np.float64)
     mu_p = model.compute_mu_from_posterior(
         posterior=post,
         log_price=log_price + h,
@@ -156,6 +162,7 @@ def _posterior_local_elasticity(
         X_cross=None,
         t_years=t_years,
         X_season=X_season,
+        log_discount_index=log_discount_index,
     )
     mu_m = model.compute_mu_from_posterior(
         posterior=post,
@@ -165,9 +172,32 @@ def _posterior_local_elasticity(
         X_cross=None,
         t_years=t_years,
         X_season=X_season,
+        log_discount_index=log_discount_index,
     )
     denom = (2.0 * h)[np.newaxis, np.newaxis, :]
     return (mu_p - mu_m) / denom
+
+
+def _price_axis_label(model: "DemandModel") -> str:
+    if model.panel_columns.discount_col:
+        return "regular price"
+    return "price"
+
+
+def _draw_elasticity_intervals(ax, elasticity, ylabels, *, hdi_prob: float, xlabel: str, title: str):
+    sku_codes = elasticity.coords["sku"].values
+    for i, sku_code in enumerate(sku_codes):
+        draws = elasticity.sel(sku=sku_code).values.flatten()
+        mean = float(np.mean(draws))
+        lower, upper = _extract_hdi(draws, hdi_prob=hdi_prob)
+        ax.plot(mean, i, "o", markersize=7, color="C0")
+        ax.plot([lower, upper], [i, i], linewidth=2, alpha=0.8, color="C0")
+    ax.set_yticks(range(len(sku_codes)))
+    ax.set_yticklabels(ylabels, fontsize=8)
+    ax.set_xlabel(xlabel)
+    ax.axvline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.set_title(title)
+    return ax
 
 
 def plot_elasticity_posterior(
@@ -179,37 +209,85 @@ def plot_elasticity_posterior(
     """
     Plot posterior mean + horizontal HDI interval per SKU elasticity.
 
-    The plot is intentionally simple (no coloring, no true-value markers).
+    With a promo elasticity in the posterior, regular-price and promo
+    elasticities are drawn side by side. The plot is intentionally simple
+    (no coloring, no true-value markers).
     """
     model._require_fitted()
     assert model.idata is not None
 
-    if ax is None:
-        _, ax = plt.subplots(figsize=(10, 8))
-
     elasticity = model.idata.posterior["elasticity_sku"]
     sku_codes = elasticity.coords["sku"].values
-
     if model.sku_levels_ is not None and len(model.sku_levels_) == len(sku_codes):
         ylabels = [str(x) for x in model.sku_levels_]
     else:
         ylabels = [str(x) for x in sku_codes]
 
-    for i, sku_code in enumerate(sku_codes):
-        draws = elasticity.sel(sku=sku_code).values.flatten()
-        mean = float(np.mean(draws))
-        lower, upper = _extract_hdi(draws, hdi_prob=hdi_prob)
+    hdi_pct = int(hdi_prob * 100)
+    has_promo = "promo_elasticity_sku" in model.idata.posterior
+    if has_promo and ax is None:
+        _, axes = plt.subplots(1, 2, figsize=(12, 8), sharey=True)
+        _draw_elasticity_intervals(
+            axes[0],
+            elasticity,
+            ylabels,
+            hdi_prob=hdi_prob,
+            xlabel="Regular-price elasticity",
+            title=f"Regular-price elasticity\n(mean + {hdi_pct}% HDI)",
+        )
+        _draw_elasticity_intervals(
+            axes[1],
+            model.idata.posterior["promo_elasticity_sku"],
+            ylabels,
+            hdi_prob=hdi_prob,
+            xlabel="Promo elasticity",
+            title=f"Promo elasticity\n(mean + {hdi_pct}% HDI)",
+        )
+        plt.tight_layout()
+        return axes
 
-        ax.plot(mean, i, "o", markersize=7, color="C0")
-        ax.plot([lower, upper], [i, i], linewidth=2, alpha=0.8, color="C0")
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 8))
+    if has_promo:
+        offset = 0.15
+        promo = model.idata.posterior["promo_elasticity_sku"]
+        for i, sku_code in enumerate(sku_codes):
+            for series, shift, color, label in (
+                (elasticity, -offset, "C0", "Regular price"),
+                (promo, offset, "C1", "Promo"),
+            ):
+                draws = series.sel(sku=sku_code).values.flatten()
+                mean = float(np.mean(draws))
+                lower, upper = _extract_hdi(draws, hdi_prob=hdi_prob)
+                ax.plot(
+                    mean,
+                    i + shift,
+                    "o",
+                    markersize=7,
+                    color=color,
+                    label=label if i == 0 else None,
+                )
+                ax.plot([lower, upper], [i + shift, i + shift], linewidth=2, alpha=0.8, color=color)
+        ax.legend(loc="best")
+        ax.set_xlabel("Elasticity")
+        ax.set_title(
+            f"Regular-price and promo elasticity per SKU\n(mean + {hdi_pct}% HDI)"
+        )
+    else:
+        _draw_elasticity_intervals(
+            ax,
+            elasticity,
+            ylabels,
+            hdi_prob=hdi_prob,
+            xlabel="Own-price elasticity",
+            title=f"Estimated own-price elasticity per SKU\n(mean + {hdi_pct}% HDI)",
+        )
+        plt.tight_layout()
+        return ax
 
     ax.set_yticks(range(len(sku_codes)))
     ax.set_yticklabels(ylabels, fontsize=8)
-    ax.set_xlabel("Own-price elasticity")
     ax.axvline(0, color="gray", linestyle=":", alpha=0.3)
-    ax.set_title(
-        f"Estimated own-price elasticity per SKU\n(mean + {int(hdi_prob * 100)}% HDI)"
-    )
     plt.tight_layout()
     return ax
 
@@ -357,7 +435,7 @@ def plot_response_curve(
         color="C0",
         label=f"{int(hdi_prob * 100)}% HDI",
     )
-    ax.set_xlabel("price")
+    ax.set_xlabel(_price_axis_label(model))
     ax.set_ylabel("quantity")
     ax.set_title(f"Predicted response for {model.sku_col}={sku_value}")
     ax.legend(loc="best")
@@ -439,7 +517,7 @@ def plot_local_elasticity_vs_price(
         label=f"{int(hdi_prob * 100)}% HDI",
     )
     ax.axhline(0.0, color="gray", linestyle=":", alpha=0.35)
-    ax.set_xlabel("price")
+    ax.set_xlabel(_price_axis_label(model))
     ax.set_ylabel(r"local elasticity $d\mu / d\log p$")
     ax.set_title(f"Local own-price elasticity vs price ({model.sku_col}={sku_value})")
     ax.legend(loc="best")
@@ -502,7 +580,7 @@ def plot_revenue_vs_price(
         color="C1",
         label=f"{int(hdi_prob * 100)}% HDI",
     )
-    ax.set_xlabel("price")
+    ax.set_xlabel(_price_axis_label(model))
     ax.set_ylabel("revenue (price × quantity)")
     ax.set_title(f"Predicted revenue for {model.sku_col}={sku_value}")
     ax.legend(loc="best")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import warnings
@@ -7,7 +8,7 @@ from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import arviz as az
 import numpy as np
@@ -24,9 +25,12 @@ from pypricing.model_components.cross_elasticity import (
 )
 from pypricing.data import CrossPairIndex, PanelColumns, PricePanelData
 from pypricing.data.price_panel import (
+    decompose_log_price,
     floor_censored_fraction,
     parse_period_index,
     period_to_t_years,
+    read_discount_fraction,
+    skus_without_variation,
 )
 from pypricing.model_components.time_terms import (
     TrendKind,
@@ -35,6 +39,9 @@ from pypricing.model_components.time_terms import (
     normalize_seasonality,
     seasonality_components_for_frequency,
 )
+
+if TYPE_CHECKING:
+    from pypricing.diagnostics.report import DiagnosticsReport
 
 try:
     _PKG_VERSION = pkg_version("pypricing")
@@ -91,7 +98,11 @@ class DemandModel:
         Column names and panel knobs (SKU / price / quantity, controls,
         instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
         ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
-        IV on the log-demand model classes.
+        IV on the log-demand model classes. ``discount_col``, when set, splits
+        own-price response into a regular-price elasticity (``elasticity_sku``,
+        the curve at regular price) and a log-linear promo elasticity
+        (``promo_elasticity_sku``). ``predict`` then requires that column;
+        ``price`` stays the price actually paid.
     cross_elasticity
         If set, add directed cross-price effects (``CrossElasticitySpec``). Requires
         a balanced market cell per ``period`` (and ``region`` when used).
@@ -148,7 +159,28 @@ class DemandModel:
         self.cross_pairs_: CrossPairIndex | None = None
         self.t0_: pd.Timestamp | None = None
         self.seasonality_: tuple[str, ...] | None = None
+        self.no_discount_variation_skus_: list[Any] = []
+        self.no_regular_price_variation_skus_: list[Any] = []
+        self.fit_kwargs_: dict[str, Any] = {}
         self._validate_configuration()
+
+    def clone(self, **panel_overrides: Any) -> Self:
+        """Unfitted copy with the same configuration.
+
+        ``panel_overrides`` replace fields of ``panel_columns``. Once fitted,
+        ``control_columns`` is pinned to ``control_names_`` unless overridden,
+        so auto-detection can't change the controls between fits.
+        """
+        if self.sku_levels_ is not None:
+            panel_overrides.setdefault("control_columns", self.control_names_)
+        return type(self)(
+            panel_columns=dataclasses.replace(self.panel_columns, **panel_overrides),
+            cross_elasticity=self.cross_elasticity,
+            trend=self.trend,
+            seasonality=self.seasonality,
+            model_config=self.model_config,
+            sampler_config=self.sampler_config,
+        )
 
     @property
     def model_name(self) -> str:
@@ -205,7 +237,9 @@ class DemandModel:
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
+        log_discount_index: np.ndarray | None = None,
     ) -> np.ndarray:
+        """Mean log-quantity. ``log_price`` is log regular price when discounts are used."""
         pass
 
     def _uses_calendar(self) -> bool:
@@ -261,6 +295,7 @@ class DemandModel:
                 {
                     "sku_col": cols.sku_col,
                     "price_col": cols.price_col,
+                    "discount_col": cols.discount_col,
                     "quantity_col": cols.quantity_col,
                     "quantity_floor": cols.quantity_floor,
                     "control_columns": cols.control_columns,
@@ -328,6 +363,7 @@ class DemandModel:
         panel_columns = PanelColumns(
             sku_col=pc["sku_col"],
             price_col=pc["price_col"],
+            discount_col=pc.get("discount_col"),
             quantity_col=pc["quantity_col"],
             quantity_floor=float(pc["quantity_floor"]),
             control_columns=tuple(control_raw) if control_raw is not None else None,
@@ -450,6 +486,8 @@ class DemandModel:
                     stacklevel=2,
                 )
 
+        self._warn_unidentified_prices(panel)
+
         if self.cross_elasticity is not None:
             cross_pairs = enumerate_cross_pairs(
                 mode=self.cross_elasticity.mode,
@@ -469,7 +507,7 @@ class DemandModel:
         mid = np.empty(panel.n_skus, dtype=np.float64)
         for sku_idx in range(panel.n_skus):
             mask = panel.obs_sku_idx == sku_idx
-            mid[sku_idx] = float(np.median(panel.log_price[mask]))
+            mid[sku_idx] = float(np.median(panel.log_regular_price[mask]))
         self.log_price_midpoint_sku_ = mid
 
         self.model = self._build_pymc_model(panel)
@@ -477,6 +515,44 @@ class DemandModel:
         self.control_names_ = panel.control_names
         self.iv_names_ = panel.iv_names
         self.data = data.copy()
+
+    def _warn_unidentified_prices(self, panel: PricePanelData) -> None:
+        regular = skus_without_variation(
+            panel.log_regular_price, panel.obs_sku_idx, panel.sku_levels
+        )
+        if panel.log_discount_index is None:
+            discount: list[Any] = []
+        else:
+            discount = skus_without_variation(
+                panel.log_discount_index, panel.obs_sku_idx, panel.sku_levels
+            )
+        self.no_regular_price_variation_skus_ = regular
+        self.no_discount_variation_skus_ = discount
+        if discount:
+            assert panel.log_discount_index is not None
+            all_zero = True
+            for i, sku in enumerate(panel.sku_levels):
+                if sku not in discount:
+                    continue
+                column = panel.log_discount_index[panel.obs_sku_idx == i]
+                if float(np.max(np.abs(column))) > 1e-8:
+                    all_zero = False
+                    break
+            reason = (
+                "discount = 0 on every row" if all_zero else "no discount variation"
+            )
+            warnings.warn(
+                f"SKU(s) {discount} have {reason}; promo_elasticity_sku is "
+                "prior-only for them.",
+                stacklevel=3,
+            )
+        if regular:
+            warnings.warn(
+                f"SKU(s) {regular} have a regular price that never changes; "
+                "elasticity_sku is prior-only for them. Use group_columns to pool "
+                "price variation across SKUs.",
+                stacklevel=3,
+            )
 
     def build_from_idata(self, idata: az.InferenceData) -> None:
         if not hasattr(idata, "fit_data"):
@@ -486,6 +562,7 @@ class DemandModel:
 
     def fit(self, data: pd.DataFrame, **sample_kwargs: Any) -> az.InferenceData:
         self.build_model(data)
+        self.fit_kwargs_ = dict(sample_kwargs)
         sampler_kwargs = dict(self.sampler_config)
         sampler_kwargs.update(sample_kwargs)
         with self.model:
@@ -513,6 +590,7 @@ class DemandModel:
             candidates = [
                 "alpha_sku",
                 "elasticity_sku",
+                "promo_elasticity_sku",
                 "curvature_sku",
                 "sigma",
                 "beta_control",
@@ -530,16 +608,50 @@ class DemandModel:
         return az.summary(self.idata, var_names=var_names, **summary_kwargs)
 
     def run_diagnostics(
-        self, *, floor_censoring_threshold: float | None = None
-    ) -> dict[str, Any]:
-        """
+        self,
+        *,
+        fit: bool = True,
+        benchmarks: bool = True,
+        sensitivity: bool = True,
+        instruments: bool = True,
+        falsification: bool = False,
+        compare_ols: bool = False,
+        hdi_prob: float = 0.94,
+        floor_censoring_threshold: float | None = None,
+    ) -> DiagnosticsReport:
+        """Sampler health plus the selected model checks, as a printable report.
+
         Parameters
         ----------
+        fit, benchmarks, sensitivity, instruments
+            Toggle the fast checks (on by default). ``instruments`` is skipped
+            when the model has none.
+        falsification, compare_ols
+            Toggle the checks that refit the model (off by default).
+        hdi_prob
+            Interval width for the fit coverage and falsification checks.
         floor_censoring_threshold
             Overrides ``panel_columns.floor_censoring_warn_threshold`` for this
             call only, without needing to refit. ``None`` (default) uses the
             value configured on the model.
         """
+        from pypricing.diagnostics.report import run_diagnostics as _run_diagnostics
+
+        return _run_diagnostics(
+            self,
+            self._sampler_diagnostics(floor_censoring_threshold),
+            fit=fit,
+            benchmarks=benchmarks,
+            sensitivity=sensitivity,
+            instruments=instruments,
+            falsification=falsification,
+            compare_ols=compare_ols,
+            hdi_prob=hdi_prob,
+        )
+
+    def _sampler_diagnostics(
+        self, floor_censoring_threshold: float | None = None
+    ) -> dict[str, Any]:
         self._require_fitted()
         assert self.idata is not None
         out: dict[str, Any] = {}
@@ -570,65 +682,13 @@ class DemandModel:
             }
         else:
             out["floor_censored_skus"] = {}
-        out.update(self._iv_diagnostics())
-        return out
-
-    def _first_stage_exogenous(self) -> np.ndarray:
-        """Regressors partialled out of the price equation before the instrument F."""
-        assert self.data is not None and self.sku_levels_ is not None
-        sku = pd.Categorical(self.data[self.sku_col], categories=self.sku_levels_)
-        dummies = pd.get_dummies(sku).to_numpy(dtype=np.float64)
-        parts: list[np.ndarray] = [dummies]
-        if self.control_names_:
-            controls = self.data.loc[:, list(self.control_names_)].to_numpy(
-                dtype=np.float64
-            )
-            parts.append(controls)
-        if self.trend is not None:
-            t = self._t_years_for_frame(self.data).reshape(-1, 1)
-            if self.trend == "sku":
-                parts.append(dummies * t)
-            else:
-                parts.append(t)
-        season = self._season_features_for_frame(self.data)
-        if season is not None and season.size:
-            parts.append(season)
-        return np.column_stack(parts)
-
-    def _iv_diagnostics(self, *, hdi_prob: float = 0.9) -> dict[str, Any]:
-        """Endogeneity interval for ``rho`` and the first-stage partial F."""
-        from pypricing.model_components.iv_terms import (
-            WEAK_IV_F_THRESHOLD,
-            first_stage_partial_f,
+        out["no_discount_variation_skus"] = list(self.no_discount_variation_skus_)
+        out["no_regular_price_variation_skus"] = list(
+            self.no_regular_price_variation_skus_
         )
+        from pypricing.diagnostics.identification import iv_diagnostics
 
-        assert self.idata is not None
-        post = self.idata.posterior
-        if "rho" not in post and "pi" not in post:
-            return {}
-
-        out: dict[str, Any] = {}
-        alpha = (1.0 - hdi_prob) / 2.0
-        if "rho" in post:
-            rho = np.asarray(post["rho"].values, dtype=np.float64).ravel()
-            out["rho_mean"] = float(np.mean(rho))
-            lo, hi = np.quantile(rho, [alpha, 1.0 - alpha])
-            out["rho_hdi"] = (float(lo), float(hi))
-            out["rho_hdi_includes_zero"] = bool(lo <= 0.0 <= hi)
-        if self.iv_names_ and self.data is not None:
-            instruments = self.data.loc[:, list(self.iv_names_)].to_numpy(
-                dtype=np.float64
-            )
-            log_price = np.log(
-                self.data[self.price_col].to_numpy(dtype=np.float64)
-            )
-            f_stat = first_stage_partial_f(
-                log_price,
-                instruments,
-                self._first_stage_exogenous(),
-            )
-            out["first_stage_f"] = f_stat
-            out["weak_iv"] = bool(f_stat < WEAK_IV_F_THRESHOLD)
+        out.update(iv_diagnostics(self))
         return out
 
     def graphviz(self):
@@ -769,7 +829,12 @@ class DemandModel:
 
     def _build_prediction_features(
         self, df: pd.DataFrame
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+        """Log regular price, SKU index, controls, and log discount index.
+
+        ``price`` is the price actually paid. When the model was fit with
+        ``discount_col``, that column is required.
+        """
         self._require_fitted()
         assert self.sku_levels_ is not None
         if self.panel_columns.sku_col not in df.columns:
@@ -777,6 +842,12 @@ class DemandModel:
         if self.panel_columns.price_col not in df.columns:
             raise ValueError(
                 f"Missing required column: {self.panel_columns.price_col!r}"
+            )
+        discount_col = self.panel_columns.discount_col
+        if discount_col is not None and discount_col not in df.columns:
+            raise ValueError(
+                f"Model was fit with discount column {discount_col!r}; "
+                "prediction data must include it. `price` is the price actually paid."
             )
 
         sku_values = df[self.panel_columns.sku_col]
@@ -792,7 +863,15 @@ class DemandModel:
         price = df[self.panel_columns.price_col].to_numpy(dtype=np.float64)
         if (price <= 0).any():
             raise ValueError("price must be strictly positive for log transform")
-        log_price = np.log(price)
+        discount = None
+        if discount_col is not None:
+            discount = read_discount_fraction(
+                df,
+                discount_col=discount_col,
+                sku_col=self.panel_columns.sku_col,
+                price_col=self.panel_columns.price_col,
+            )
+        _log_paid, log_regular, log_discount_index = decompose_log_price(price, discount)
 
         if self.control_names_:
             missing = [c for c in self.control_names_ if c not in df.columns]
@@ -803,8 +882,8 @@ class DemandModel:
             X = df.loc[:, list(self.control_names_)].to_numpy(dtype=np.float64)
             if np.isnan(X).any():
                 raise ValueError("NaN in control columns are not allowed")
-            return log_price, obs_sku_idx, X
-        return log_price, obs_sku_idx, None
+            return log_regular, obs_sku_idx, X, log_discount_index
+        return log_regular, obs_sku_idx, None, log_discount_index
 
     def _resolve_seasonality(
         self, period_index: pd.DatetimeIndex | None
@@ -921,7 +1000,9 @@ class DemandModel:
         self._require_fitted()
         assert self.idata is not None
 
-        log_price, obs_sku_idx, X_control = self._build_prediction_features(df)
+        log_price, obs_sku_idx, X_control, log_discount_index = (
+            self._build_prediction_features(df)
+        )
         X_cross = self._cross_matrix_for_frame(df, obs_sku_idx)
         t_years = self._t_years_for_frame(df)
         X_season = self._season_features_for_frame(df)
@@ -935,6 +1016,7 @@ class DemandModel:
             X_cross=X_cross,
             t_years=t_years,
             X_season=X_season,
+            log_discount_index=log_discount_index,
         )
 
         rng = np.random.default_rng(random_seed)
@@ -974,6 +1056,9 @@ class DemandModel:
 
         out = df.copy()
         out["quantity_mean"] = mean
+        out["log_quantity_mean"] = (
+            ds["log_quantity"].mean(dim=("chain", "draw")).to_numpy()
+        )
         out["quantity_hdi_lower"] = lower
         out["quantity_hdi_upper"] = upper
         return out
@@ -992,13 +1077,14 @@ class DemandModel:
         periods = pd.unique(df[period_col])
         if len(periods) < 2:
             raise ValueError("Need at least 2 unique periods for a train/test split")
+        # Keep the original period values. np.sort(...).tolist() turns datetimes
+        # into integer nanoseconds, and isin then matches nothing.
         try:
-            periods_sorted = np.sort(periods)
-        except Exception:
-            periods_sorted = np.array(sorted(periods.tolist()), dtype=object)
+            periods_sorted = pd.Index(periods).sort_values()
+        except TypeError:
+            periods_sorted = pd.Index(sorted(periods.tolist()))
         n_test_periods = max(1, int(np.ceil(test_size * len(periods_sorted))))
-        test_periods = set(periods_sorted[-n_test_periods:].tolist())
-        is_test = df[period_col].isin(test_periods)
+        is_test = df[period_col].isin(periods_sorted[-n_test_periods:])
         return df.loc[~is_test].copy(), df.loc[is_test].copy()
 
     def fit_train_test(
@@ -1021,21 +1107,89 @@ class DemandModel:
         if random_seed is not None and "random_seed" not in fit_sample_kwargs:
             fit_sample_kwargs["random_seed"] = random_seed
         self.fit(train_df, **fit_sample_kwargs)
-        preds = self.predict(test_df, hdi_prob=hdi_prob, random_seed=random_seed)
+        from pypricing.diagnostics.fit import fit_metrics
 
-        y_true = test_df[self.panel_columns.quantity_col].to_numpy(dtype=np.float64)
-        y_pred = preds["quantity_mean"].to_numpy(dtype=np.float64)
-        rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-        lower = preds["quantity_hdi_lower"].to_numpy(dtype=np.float64)
-        upper = preds["quantity_hdi_upper"].to_numpy(dtype=np.float64)
-        hdi_coverage = float(np.mean((y_true >= lower) & (y_true <= upper)))
+        preds = self.predict(test_df, hdi_prob=hdi_prob, random_seed=random_seed)
+        overall = fit_metrics(
+            preds,
+            quantity_col=self.quantity_col,
+            quantity_floor=self.quantity_floor,
+        ).loc["overall"]
         return {
-            "rmse": rmse,
-            "hdi_coverage": hdi_coverage,
+            "rmse": float(overall["rmse"]),
+            "rmse_log": float(overall["rmse_log"]),
+            "bias_log": float(overall["bias_log"]),
+            "hdi_coverage": float(overall["hdi_coverage"]),
             "test_predictions": preds,
             "n_train": len(train_df),
             "n_test": len(test_df),
         }
+
+    def check_fit(
+        self,
+        df: pd.DataFrame | None = None,
+        *,
+        by: str | None = None,
+        hdi_prob: float = 0.94,
+        min_rows: int = 10,
+        random_seed: int | None = None,
+    ) -> pd.DataFrame:
+        from pypricing.diagnostics.fit import check_fit as _check_fit
+
+        return _check_fit(
+            self,
+            df,
+            by=by,
+            hdi_prob=hdi_prob,
+            min_rows=min_rows,
+            random_seed=random_seed,
+        )
+
+    def check_benchmarks(
+        self, *, extreme_threshold: float = 0.99
+    ) -> dict[str, pd.DataFrame | None]:
+        from pypricing.diagnostics.benchmarks import (
+            check_benchmarks as _check_benchmarks,
+        )
+
+        return _check_benchmarks(self, extreme_threshold=extreme_threshold)
+
+    def check_falsification(
+        self,
+        df: pd.DataFrame | None = None,
+        *,
+        hdi_prob: float = 0.94,
+        **sample_kwargs: Any,
+    ) -> dict[str, Any]:
+        from pypricing.diagnostics.falsification import (
+            check_falsification as _check_falsification,
+        )
+
+        return _check_falsification(self, df, hdi_prob=hdi_prob, **sample_kwargs)
+
+    def check_instruments(
+        self,
+        *,
+        hdi_prob: float = 0.9,
+        compare_ols: bool = True,
+        **sample_kwargs: Any,
+    ) -> dict[str, Any]:
+        from pypricing.diagnostics.identification import (
+            check_instruments as _check_instruments,
+        )
+
+        return _check_instruments(
+            self, hdi_prob=hdi_prob, compare_ols=compare_ols, **sample_kwargs
+        )
+
+    def check_sensitivity(
+        self, *, q: float = 1.0, alpha: float = 0.05
+    ) -> pd.DataFrame:
+        from pypricing.diagnostics.sensitivity import (
+            check_sensitivity as _check_sensitivity,
+        )
+
+        return _check_sensitivity(self, q=q, alpha=alpha)
 
     def optimize_prices(
         self,
@@ -1063,6 +1217,11 @@ class DemandModel:
         hdi_prob: float = 0.9,
         return_draws: bool = False,
     ) -> pd.DataFrame | tuple[pd.DataFrame, xr.DataArray]:
+        """Quantity change from scaling regular price by ``price_multiplier``.
+
+        Log-log only. The discount fraction is held fixed; ``elasticity_sku``
+        is the regular-price elasticity.
+        """
         from pypricing.posterior import (
             quantity_multiplier_posterior as _quantity_multiplier_posterior,
             summarize_quantity_multiplier_by_sku as _quantity_multiplier_summary,

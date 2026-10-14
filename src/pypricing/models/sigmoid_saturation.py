@@ -16,7 +16,8 @@ from pypricing.model_components.priors import (
 )
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
-from pypricing.model_components.posterior_mu import add_controls_and_cross
+from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
+from pypricing.model_components.promo_terms import get_promo_term
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
 from pypricing.model_components.iv_terms import get_control_function_term
 
@@ -26,12 +27,13 @@ class SigmoidSaturationDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku - softplus(b_sku * (P - P_center_sku)) + controls + cross + trend + season``
+    ``mu = alpha_sku - softplus(b_sku * (R - R_center_sku)) + promo_elasticity_sku * log(1 - d) + controls + cross + trend + season``
 
-    with ``b_sku = -2 * elasticity_sku / P_center_sku`` so elasticity at the center
-    equals ``elasticity_sku``. ``log_price_center_sku`` is learned; its prior mean is
-    the per-SKU training median log-price. Prefer when response flattens at extreme
-    prices.
+    with ``b_sku = -2 * elasticity_sku / R_center_sku`` so elasticity at the center
+    equals ``elasticity_sku``. ``R`` is the regular price. ``log_price_center_sku``
+    is learned; its prior mean is the per-SKU training median log regular price.
+    The promo term is log-linear and is omitted when ``discount_col`` is unset.
+    Prefer when response flattens at extreme regular prices.
 
     Optional control-function IV: same first-stage residual as log-log / quadratic.
     Estimation uses it; ``predict`` / ``optimize_prices`` use the structural curve
@@ -48,7 +50,7 @@ class SigmoidSaturationDemandModel(DemandModel):
 
         coords = data.coords()
         obs_sku = pt.constant(data.obs_sku_idx)
-        log_p = pt.constant(data.log_price)
+        log_p = pt.constant(data.log_regular_price)
         price = pt.exp(log_p)
         log_p_mid_sku = pt.constant(
             np.asarray(self.log_price_midpoint_sku_, dtype=float)
@@ -111,6 +113,8 @@ class SigmoidSaturationDemandModel(DemandModel):
                 + season_term
                 + control_function_term
             )
+            if data.log_discount_index is not None:
+                mu = mu + get_promo_term(self.model_config, data)
             pm.Normal(
                 "log_quantity",
                 mu=mu,
@@ -130,6 +134,7 @@ class SigmoidSaturationDemandModel(DemandModel):
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
+        log_discount_index: np.ndarray | None = None,
     ) -> np.ndarray:
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
@@ -152,6 +157,7 @@ class SigmoidSaturationDemandModel(DemandModel):
         b_obs = -2.0 * elasticity_obs / p_center_obs
         z = b_obs * (p_obs - p_center_obs)
         mu = alpha_obs - softplus(z)
+        mu = add_promo(mu, posterior, log_discount_index, obs_sku_idx)
         return add_controls_and_cross(
             mu=mu,
             posterior=posterior,

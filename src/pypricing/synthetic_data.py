@@ -47,6 +47,7 @@ class MockDataTruth:
     n_instruments: int = 0
     instrument_coef: float = 0.0
     endogeneity: float = 0.0
+    promo_elasticity: float | None = None
 
 
 @dataclass
@@ -84,6 +85,10 @@ class _PanelSim:
     instrument_coef: float
     endogeneity: float
     noise_sigma: float
+    promotions: bool = False
+    promo_frequency: float = 0.3
+    promo_depth: float = 0.2
+    promo_elasticity: float = -3.5
 
 
 def _as_rng(random_state: RandomState) -> np.random.Generator:
@@ -436,6 +441,18 @@ def _simulate_panel_rows(
     log_price_obs, price_obs, demand_shocks, controls_panel, instruments_panel = (
         _draw_observed_log_prices(rng, sim)
     )
+    # Regular price is the random walk (plus instruments and endogeneity).
+    # Promotions scale the paid price off that regular price.
+    if sim.promotions:
+        discount_panel = np.where(
+            rng.random((sim.n_skus, sim.n_reg, sim.n_periods)) < sim.promo_frequency,
+            sim.promo_depth,
+            0.0,
+        )
+        paid_log_price = log_price_obs + np.log(1.0 - discount_panel)
+    else:
+        discount_panel = None
+        paid_log_price = log_price_obs
     sku_log_p_mid = np.median(log_price_obs, axis=(1, 2))
 
     for s in range(sim.n_skus):
@@ -492,6 +509,10 @@ def _simulate_panel_rows(
                 ),
                 log_p_mid=float(sku_log_p_mid[s]),
             )
+            if discount_panel is not None:
+                mean_log_q = mean_log_q + sim.promo_elasticity * np.log(
+                    1.0 - discount_panel[s, r]
+                )
 
             if sim.gamma_map is not None:
                 for t in range(sim.n_periods):
@@ -501,20 +522,30 @@ def _simulate_panel_rows(
                             continue
                         g = sim.gamma_map.get((s, j))
                         if g is not None:
-                            cross_sum += g * log_price_obs[j, r, t]
+                            cross_sum += g * paid_log_price[j, r, t]
                     mean_log_q[t] += cross_sum
 
             quantity = np.exp(mean_log_q)
 
             for t in range(sim.n_periods):
+                if discount_panel is None:
+                    paid_price = float(price[t])
+                    paid_log = float(log_price[t])
+                    discount_t = None
+                else:
+                    discount_t = float(discount_panel[s, r, t])
+                    paid_price = float(price[t] * (1.0 - discount_t))
+                    paid_log = float(np.log(paid_price))
                 row: dict = {
                     "sku": f"sku_{s + 1}",
                     "period": sim.date_index[t] if sim.date_index is not None else t,
-                    "price": float(price[t]),
+                    "price": paid_price,
                     "quantity": float(quantity[t]),
-                    "log_price": float(log_price[t]),
+                    "log_price": paid_log,
                     "log_quantity": float(mean_log_q[t]),
                 }
+                if discount_t is not None:
+                    row["discount_rate"] = discount_t
                 if hierarchy is not None:
                     for L in range(hierarchy.n_levels):
                         row[f"category_{L + 1}"] = (
@@ -557,6 +588,11 @@ def generate_mock_data(
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
     noise_sigma: float | None = None,
+    promotions: bool = False,
+    promo_frequency: float = 0.3,
+    promo_depth: float = 0.2,
+    true_promo_elasticity: float | None = None,
+    true_elasticity: float | None = None,
     return_truth: Literal[False] = False,
 ) -> pd.DataFrame: ...
 
@@ -583,6 +619,11 @@ def generate_mock_data(
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
     noise_sigma: float | None = None,
+    promotions: bool = False,
+    promo_frequency: float = 0.3,
+    promo_depth: float = 0.2,
+    true_promo_elasticity: float | None = None,
+    true_elasticity: float | None = None,
     return_truth: Literal[True],
 ) -> tuple[pd.DataFrame, MockDataTruth]: ...
 
@@ -608,6 +649,11 @@ def generate_mock_data(
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
     noise_sigma: float | None = None,
+    promotions: bool = False,
+    promo_frequency: float = 0.3,
+    promo_depth: float = 0.2,
+    true_promo_elasticity: float | None = None,
+    true_elasticity: float | None = None,
     return_truth: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, MockDataTruth]:
     """
@@ -695,6 +741,23 @@ def generate_mock_data(
         prices). Positive values bias associational elasticity toward zero.
     noise_sigma
         Std of the Gaussian demand shock (default ``0.12``).
+    promotions
+        If ``True``, mark a fraction ``promo_frequency`` of rows as temporary
+        discounts of depth ``promo_depth`` (fraction off the regular price) and
+        write ``discount_rate``. ``price`` is the price paid;
+        ``regular = price / (1 - discount_rate)``. The promo term is log-linear:
+        ``true_promo_elasticity * log(1 - discount)``. Cross-price terms use
+        other SKUs' paid log prices. Fixed-amount discounts are not generated.
+    promo_frequency
+        Probability a row is on promo when ``promotions`` is set (default ``0.3``).
+    promo_depth
+        Discount fraction on promo rows (default ``0.2``, so 20% off).
+    true_promo_elasticity
+        Promo elasticity on every SKU when ``promotions`` is set. Default
+        ``-3.5`` (short-term promo mean from Bijmolt et al. 2005).
+    true_elasticity
+        If set, every SKU's regular-price elasticity is this value instead of
+        a random draw.
     return_truth
         If ``True``, also return a :class:`MockDataTruth` with per-SKU DGP
         parameters (and optional cross / control draws).
@@ -703,8 +766,9 @@ def generate_mock_data(
     -------
     pandas.DataFrame or tuple
         Columns: ``sku``, ``period``, ``price``, ``quantity``, ``log_price``,
-        ``log_quantity``, optional ``category`` or ``category_1`` …, ``region``,
-        ``control_*``, ``iv_*``. With ``return_truth=True``, ``(frame, truth)``.
+        ``log_quantity``, optional ``discount_rate`` (when ``promotions`` is
+        set), ``category`` or ``category_1`` …, ``region``, ``control_*``,
+        ``iv_*``. With ``return_truth=True``, ``(frame, truth)``.
     """
     ce = _validate_kwargs(
         n_periods,
@@ -728,6 +792,13 @@ def generate_mock_data(
         noise_sigma = _PANEL_NOISE_SIGMA
     elif noise_sigma <= 0:
         raise ValueError("noise_sigma must be positive")
+    if promotions:
+        if not 0.0 < promo_frequency <= 1.0:
+            raise ValueError("promo_frequency must be in (0, 1]")
+        if not 0.0 < promo_depth < 1.0:
+            raise ValueError("promo_depth must be in (0, 1)")
+        if true_promo_elasticity is None:
+            true_promo_elasticity = -3.5
 
     rng = _as_rng(random_state)
 
@@ -753,6 +824,8 @@ def generate_mock_data(
         hierarchy_levels=hierarchy_levels,
         demand_shape=demand_shape,
     )
+    if true_elasticity is not None:
+        effects.elasticity = np.full(n_skus, float(true_elasticity), dtype=np.float64)
 
     control_coefs = (
         rng.normal(0, 0.12, size=n_controls) if n_controls else None
@@ -805,6 +878,10 @@ def generate_mock_data(
             instrument_coef=float(instrument_coef),
             endogeneity=float(endogeneity),
             noise_sigma=float(noise_sigma),
+            promotions=bool(promotions),
+            promo_frequency=float(promo_frequency),
+            promo_depth=float(promo_depth),
+            promo_elasticity=float(true_promo_elasticity or 0.0),
         ),
     )
     df = pd.DataFrame(rows)
@@ -833,5 +910,6 @@ def generate_mock_data(
         n_instruments=int(n_instruments),
         instrument_coef=float(instrument_coef),
         endogeneity=float(endogeneity),
+        promo_elasticity=None if not promotions else float(true_promo_elasticity),
     )
     return df, truth

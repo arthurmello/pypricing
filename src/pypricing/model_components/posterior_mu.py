@@ -33,6 +33,20 @@ def add_season(
     return mu + np.einsum("cdk,ok->cdo", beta, X_season, optimize=True)
 
 
+def add_promo(
+    mu: np.ndarray,
+    posterior: xr.Dataset,
+    log_discount_index: np.ndarray | None,
+    obs_sku_idx: np.ndarray,
+) -> np.ndarray:
+    """Add ``promo_elasticity_sku * log(1 - d)``. No-op without a discount index."""
+    if log_discount_index is None or "promo_elasticity_sku" not in posterior:
+        return mu
+    promo = posterior["promo_elasticity_sku"].values
+    index = np.asarray(log_discount_index, dtype=np.float64)
+    return mu + promo[:, :, obs_sku_idx] * index[None, None, :]
+
+
 def add_controls_and_cross(
     mu: np.ndarray,
     posterior: xr.Dataset,

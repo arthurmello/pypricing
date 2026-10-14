@@ -6,6 +6,11 @@ one price per SKU that maximizes the posterior mean of **expected** revenue
 the residual scale, so `exp(μ + σ²/2)` is expected quantity. That is the same
 target `predict` reports as `quantity_mean`.
 
+When the model was fit with a discount column, the search sets the discount to
+0 and optimizes the **regular** price. `optimal_price` is that regular price.
+Temporary discounts are a separate elasticity (`promo_elasticity_sku`); this
+routine does not choose a promotional price.
+
 ```python
 from pypricing import LogLogDemandModel, generate_mock_data
 

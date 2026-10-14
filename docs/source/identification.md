@@ -45,7 +45,7 @@ df = generate_mock_data(
 model = LogLogDemandModel()  # auto-detects iv_*
 # or: LogLogDemandModel(panel_columns=PanelColumns(iv_columns=("iv_1",)))
 model.fit(df, draws=500, tune=500, chains=2, random_seed=0)
-print(model.run_diagnostics())  # rho, first_stage_f, weak_iv
+print(model.check_instruments())  # first-stage F, Sargan test, rho, IV vs OLS
 ```
 
 ### Estimator (control function)
@@ -59,10 +59,18 @@ mean curves):
   $\log Q = \alpha_{\mathrm{sku}} + \varepsilon_{\mathrm{sku}}\log P + X\beta + \rho v + \ldots$
 
 $Z$ is excluded from demand. $\rho$ away from 0 is evidence that price is
-endogenous. `run_diagnostics()["first_stage_f"]` is the partial F for the
+endogenous. `check_instruments()["first_stage"]["f"]` is the partial F for the
 instruments in the price equation, after SKU intercepts, controls, trend, and
-seasonality. `weak_iv` is true when that F is below 10, the usual rule of
-thumb for one endogenous price. It is not a Stock–Yogo critical value.
+seasonality. `weak` is true when that F is below 10, the usual rule of thumb
+for one endogenous price. It is not a Stock–Yogo critical value. See
+[Diagnostics](diagnostics.md#instruments) for how to read all the instrument
+checks.
+
+With a discount column the first stage is for **log regular price**,
+$\log R = \log P - \log(1-d)$, not the price actually paid. The discount
+index $\log(1-d)$ is treated as exogenous: it is not instrumented, and
+`promo_elasticity_sku` is estimated from discount variation directly. That
+assumes temporary discounts are not set in response to the demand shock.
 
 {meth}`~pypricing.DemandModel.predict` and
 {func}`~pypricing.optimize_prices` use the structural demand curve (control

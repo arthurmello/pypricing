@@ -5,6 +5,7 @@ from pypricing.data import (
     HierarchyIndex,
     PanelColumns,
     PricePanelData,
+    apply_discount,
     floor_censored_fraction,
 )
 from pypricing.model_components.cross_elasticity import CrossElasticitySpec
@@ -33,6 +34,7 @@ __all__ = [
     "LogLogDemandModel",
     "QuadraticLogDemandModel",
     "SigmoidSaturationDemandModel",
+    "apply_discount",
     "floor_censored_fraction",
     "generate_mock_data",
     "optimize_prices",

@@ -13,7 +13,8 @@ from pypricing.model_components.priors import (
 )
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
-from pypricing.model_components.posterior_mu import add_controls_and_cross
+from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
+from pypricing.model_components.promo_terms import get_promo_term
 from pypricing.model_components.time_terms import get_season_term, get_trend_term
 from pypricing.model_components.iv_terms import get_control_function_term
 
@@ -23,11 +24,12 @@ class QuadraticLogDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku + beta1_sku * log(P) + curvature_sku * log(P)^2 + ...``
+    ``mu = alpha_sku + beta1_sku * log(R) + curvature_sku * log(R)^2 + promo_elasticity_sku * log(1 - d) + ...``
 
     Reparameterized so ``elasticity_sku`` equals local elasticity at the per-SKU
-    training median log-price (``log_price_midpoint_sku_``). Use when elasticity
-    should change with price level (premium vs discount regimes).
+    training median log regular price (``log_price_midpoint_sku_``). Use when
+    elasticity should change with the regular-price level. The promo term is
+    log-linear and is omitted when ``discount_col`` is unset.
 
     Optional control-function IV: same first-stage residual as
     ``LogLogDemandModel``. Estimation uses it; ``predict`` / ``optimize_prices``
@@ -44,7 +46,7 @@ class QuadraticLogDemandModel(DemandModel):
 
         coords = data.coords()
         obs_sku = pt.constant(data.obs_sku_idx)
-        log_p = pt.constant(data.log_price)
+        log_p = pt.constant(data.log_regular_price)
         log_p_mid_sku = pt.constant(
             np.asarray(self.log_price_midpoint_sku_, dtype=float)
         )
@@ -102,6 +104,8 @@ class QuadraticLogDemandModel(DemandModel):
                 + season_term
                 + control_function_term
             )
+            if data.log_discount_index is not None:
+                mu = mu + get_promo_term(self.model_config, data)
             pm.Normal(
                 "log_quantity",
                 mu=mu,
@@ -121,6 +125,7 @@ class QuadraticLogDemandModel(DemandModel):
         X_cross: np.ndarray | None = None,
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
+        log_discount_index: np.ndarray | None = None,
     ) -> np.ndarray:
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
@@ -141,6 +146,7 @@ class QuadraticLogDemandModel(DemandModel):
 
         beta1_obs = elasticity_obs - 2.0 * curvature_obs * log_p_mid_obs[None, None, :]
         mu = alpha_obs + beta1_obs * log_price_obs + curvature_obs * (log_price_obs**2)
+        mu = add_promo(mu, posterior, log_discount_index, obs_sku_idx)
         return add_controls_and_cross(
             mu=mu,
             posterior=posterior,
