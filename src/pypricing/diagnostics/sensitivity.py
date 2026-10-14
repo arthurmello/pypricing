@@ -43,14 +43,27 @@ def _ols(
     y: np.ndarray, X: np.ndarray, slope_cols: slice
 ) -> tuple[np.ndarray, np.ndarray, int]:
     coef, _, rank, _ = np.linalg.lstsq(X, y, rcond=None)
-    resid = y - X @ coef
+    slopes = coef[slope_cols]
     df = len(y) - int(rank)
+    if df <= 0:
+        return slopes, np.full(slopes.shape, np.nan), 0
+    resid = y - X @ coef
     sigma2 = float(resid @ resid) / df
     cov = sigma2 * np.linalg.pinv(X.T @ X)
-    return coef[slope_cols], np.sqrt(np.diag(cov)[slope_cols]), df
+    se = np.sqrt(np.diag(cov)[slope_cols])
+    return slopes, np.where(np.isfinite(se), se, np.nan), df
 
 
 def _row(estimate: float, se: float, df: int, q: float, alpha: float) -> dict:
+    if df <= 0 or not np.isfinite(se) or se <= 0:
+        return {
+            "estimate": estimate,
+            "se": se,
+            "t": np.nan,
+            "partial_r2": np.nan,
+            "rv": np.nan,
+            "rv_qa": np.nan,
+        }
     t = estimate / se
     return {
         "estimate": estimate,

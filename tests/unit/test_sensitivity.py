@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pypricing.diagnostics.sensitivity import partial_r2, robustness_value
+from pypricing.diagnostics.sensitivity import _row, partial_r2, robustness_value
 
 # Cinelli & Hazlett (2020), Darfur example: "directly harmed", t = 4.18, df = 783.
 DARFUR_T = 4.18
@@ -34,6 +34,12 @@ def test_robustness_value_ignores_sign_and_scales_with_q():
 def test_insignificant_estimate_has_zero_rv_for_significance():
     assert robustness_value(1.0, 500, alpha=0.05) == 0.0
     assert robustness_value(1.0, 500) > 0.0
+
+
+def test_zero_standard_error_leaves_robustness_undefined():
+    row = _row(estimate=-1.5, se=0.0, df=20, q=1.0, alpha=0.05)
+    assert row["t"] != row["t"]
+    assert row["rv"] != row["rv"]
 
 
 def test_very_strong_estimate_uses_extreme_case():
