@@ -59,7 +59,9 @@ mean curves):
   $\log Q = \alpha_{\mathrm{sku}} + \varepsilon_{\mathrm{sku}}\log P + X\beta + \rho v + \ldots$
 
 $Z$ is excluded from demand. $\rho$ away from 0 is evidence that price is
-endogenous. `check_instruments()["first_stage"]["f"]` is the partial F for the
+endogenous. An interval that includes 0 is no evidence of endogeneity, and
+the instrumented elasticities are noisier, so drop the instruments.
+`check_instruments()["first_stage"]["f"]` is the partial F for the
 instruments in the price equation, after SKU intercepts, controls, trend, and
 seasonality. `weak` is true when that F is below 10, the usual rule of thumb
 for one endogenous price. It is not a Stock–Yogo critical value. See

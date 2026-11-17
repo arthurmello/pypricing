@@ -255,10 +255,13 @@ def check_instruments(
 ) -> dict[str, Any]:
     """First-stage strength, overidentification test, and IV vs OLS elasticities.
 
-    Warns when the first stage is weak (F below 10) or the Sargan test rejects
-    (p below 0.05). The Sargan test uses a pooled linear 2SLS demand equation,
-    not the fitted curve, so it checks whether the instruments agree with each
-    other rather than the model's exact specification.
+    Warns when the first stage is weak (F below 10), the Sargan test rejects
+    (p below 0.05), or ``rho``'s interval includes 0. An interval covering 0
+    is no evidence of endogeneity, and the instrumented elasticities are
+    noisier than the fit without instruments. The Sargan test uses a pooled
+    linear 2SLS demand equation, not the fitted curve, so it checks whether
+    the instruments agree with each other rather than the model's exact
+    specification.
 
     With ``compare_ols``, refits the model without instruments on the same
     data; ``sample_kwargs`` default to those of the last ``fit()``.
@@ -276,6 +279,14 @@ def check_instruments(
             f"Weak instruments: first-stage F = {first_stage['f']:.1f} "
             f"(< {WEAK_IV_F_THRESHOLD:.0f}). IV estimates will be noisy and "
             "pulled toward OLS.",
+            DiagnosticWarning,
+            stacklevel=3,
+        )
+
+    if diag["rho_hdi_includes_zero"]:
+        warnings.warn(
+            "No evidence of endogeneity: rho's HDI includes 0. "
+            "Dropping the instruments gives a more precise elasticity.",
             DiagnosticWarning,
             stacklevel=3,
         )

@@ -153,7 +153,9 @@ out = model.check_instruments(compare_ols=False)  # instant, no IV vs OLS compar
   disagree, so at least one may affect demand through something other than
   price.
 - `rho`: the endogeneity term. An HDI excluding 0 means price responds to
-  demand shocks, so the correction matters.
+  demand shocks, so the correction matters. An HDI that includes 0 is no
+  evidence of endogeneity; the instrumented elasticities are noisier, so
+  drop the instruments.
 - `elasticity`: elasticities with instruments (`iv`) and from a refit without
   them (`ols`). Large shifts mean the instruments change the answer, which is
   reassuring only if the first two checks pass.
