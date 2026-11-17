@@ -13,4 +13,5 @@ sigmoid
 hierarchical
 cross_elasticity
 promotions
+period_effects
 ```

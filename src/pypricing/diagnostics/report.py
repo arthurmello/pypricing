@@ -184,6 +184,12 @@ def _sampler_flags(sampler: dict[str, Any]) -> list[str]:
             "SKU(s) with no regular-price variation (elasticity_sku is prior-only; "
             f"pool with group_columns): {sampler['no_regular_price_variation_skus']}."
         )
+    if sampler.get("weak_within_period_price"):
+        share = sampler.get("within_period_price_share")
+        flags.append(
+            f"within-period log-price variation is {share:.0%} of total "
+            "(below 10%); elasticity rests on little identifying variation."
+        )
     return flags
 
 

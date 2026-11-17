@@ -17,7 +17,11 @@ from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.iv_terms import get_control_function_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
 from pypricing.model_components.promo_terms import get_promo_term
-from pypricing.model_components.time_terms import get_season_term, get_trend_term
+from pypricing.model_components.time_terms import (
+    get_period_effect_term,
+    get_season_term,
+    get_trend_term,
+)
 
 
 class LogLogDemandModel(DemandModel):
@@ -25,7 +29,7 @@ class LogLogDemandModel(DemandModel):
 
     Mean log-quantity:
 
-    ``mu = alpha_sku + elasticity_sku * log(R) + promo_elasticity_sku * log(1 - d) + controls + cross + trend + season``
+    ``mu = alpha_sku + elasticity_sku * log(R) + promo_elasticity_sku * log(1 - d) + controls + cross + trend + season + period``
     (plus a control-function residual when instruments are present).
 
     ``R`` is the regular price. With ``discount_col`` unset, ``R`` is the paid
@@ -45,7 +49,7 @@ class LogLogDemandModel(DemandModel):
         return "log_log"
 
     def _build_pymc_model(self, data: PricePanelData) -> pm.Model:
-        coords = data.coords()
+        coords = self._pymc_coords(data)
         obs_sku = pt.constant(data.obs_sku_idx)
         log_p = pt.constant(data.log_regular_price)
 
@@ -56,6 +60,7 @@ class LogLogDemandModel(DemandModel):
                 self.model_config,
                 mu_default_mu=6.0,
                 mu_default_sigma=2.0,
+                mean_shift=self._mundlak_mean_shift(),
             )
             elasticity_sku = get_sku_effect(
                 "elasticity",
@@ -74,12 +79,16 @@ class LogLogDemandModel(DemandModel):
             season_term = get_season_term(
                 self.model_config, data, components=self.seasonality_
             )
+            period_term = get_period_effect_term(
+                self.model_config, data, self.time_effects
+            )
             control_function_term = get_control_function_term(
                 self.model_config,
                 data,
                 trend=self.trend,
                 t0=self.t0_,
                 seasonality_components=self.seasonality_,
+                time_effects=self.time_effects,
             )
 
             mu = (
@@ -89,6 +98,7 @@ class LogLogDemandModel(DemandModel):
                 + self._cross_term(data)
                 + trend_term
                 + season_term
+                + period_term
                 + control_function_term
             )
             if data.log_discount_index is not None:
@@ -113,6 +123,7 @@ class LogLogDemandModel(DemandModel):
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
         log_discount_index: np.ndarray | None = None,
+        lambda_obs: np.ndarray | None = None,
     ) -> np.ndarray:
         alpha = posterior["alpha_sku"].values
         elasticity = posterior["elasticity_sku"].values
@@ -129,4 +140,5 @@ class LogLogDemandModel(DemandModel):
             t_years=t_years,
             obs_sku_idx=obs_sku_idx,
             X_season=X_season,
+            lambda_obs=lambda_obs,
         )

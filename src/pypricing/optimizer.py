@@ -21,6 +21,8 @@ def mean_revenue_at_price(
     sku_idx: int,
     X_row: np.ndarray | None,
     at_period: pd.Timestamp | str | None = None,
+    period_effect: Any = "neutral",
+    lambda_obs: np.ndarray | None = None,
 ) -> float:
     """
     Posterior mean of expected revenue for one SKU at a single price.
@@ -45,6 +47,11 @@ def mean_revenue_at_price(
     posterior = model.idata.posterior
     t_years = model._t_years_for_counterfactual(1, at_period)
     X_season = model._season_features_for_counterfactual(1, at_period)
+    if lambda_obs is None:
+        lambda_obs = model._period_effect_draws(
+            1,
+            period_effect=period_effect,
+        )
     # Regular price at discount 0: the promo index is zero, so paid price = price.
     log_discount_index = None
     if model.panel_columns.discount_col is not None:
@@ -57,6 +64,7 @@ def mean_revenue_at_price(
         t_years=t_years,
         X_season=X_season,
         log_discount_index=log_discount_index,
+        lambda_obs=lambda_obs,
     )
     sigma = np.asarray(posterior["sigma"].values, dtype=np.float64).reshape(
         mu.shape[0], mu.shape[1]
@@ -71,6 +79,7 @@ def _negative_mean_revenue(
     sku_idx: int,
     X_row: np.ndarray | None,
     at_period: pd.Timestamp | str | None,
+    lambda_obs: np.ndarray | None,
 ) -> float:
     p = float(np.exp(log_price))
     return -mean_revenue_at_price(
@@ -79,6 +88,7 @@ def _negative_mean_revenue(
         sku_idx=sku_idx,
         X_row=X_row,
         at_period=at_period,
+        lambda_obs=lambda_obs,
     )
 
 
@@ -90,6 +100,7 @@ def optimize_price_one_sku(
     price_high: float,
     X_row: np.ndarray | None,
     at_period: pd.Timestamp | str | None = None,
+    lambda_obs: np.ndarray | None = None,
     options: dict[str, Any] | None = None,
 ) -> float:
     """Maximize posterior mean expected revenue over ``[price_low, price_high]``.
@@ -114,6 +125,7 @@ def optimize_price_one_sku(
                 sku_idx=sku_idx,
                 X_row=X_row,
                 at_period=at_period,
+                lambda_obs=lambda_obs,
             )
             for log_p in grid
         ]
@@ -135,7 +147,7 @@ def optimize_price_one_sku(
         _negative_mean_revenue,
         bounds=(win_lo, win_hi),
         method="bounded",
-        args=(model, sku_idx, X_row, at_period),
+        args=(model, sku_idx, X_row, at_period, lambda_obs),
         options=opts,
     )
     polished = float(np.exp(res.x))
@@ -145,6 +157,7 @@ def optimize_price_one_sku(
         sku_idx=sku_idx,
         X_row=X_row,
         at_period=at_period,
+        lambda_obs=lambda_obs,
     )
     if polished_rev >= best_rev:
         return polished
@@ -209,6 +222,8 @@ def optimize_prices(
     price_bounds: Mapping[Any, tuple[float, float]] | pd.Series,
     controls_df: pd.DataFrame | None = None,
     at_period: pd.Timestamp | str | None = None,
+    period_effect: Any = "neutral",
+    random_seed: int | None = None,
     minimize_options: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """
@@ -235,6 +250,13 @@ def optimize_prices(
     at_period
         Calendar date for trend and seasonality. Defaults to the last training date.
         Ignored when the model has neither.
+    period_effect
+        Period effect for a date that was not in the training sample.
+        ``"neutral"`` (default) uses λ = 0, ``"draw"`` draws one λ per posterior
+        draw (shared across the price search), and a training period label
+        reuses that period's fitted λ.
+    random_seed
+        Seed for ``period_effect="draw"``.
     minimize_options
         Forwarded to the local :func:`scipy.optimize.minimize_scalar` polish.
 
@@ -263,6 +285,10 @@ def optimize_prices(
     assert model.sku_levels_ is not None
     bounds_mat = _normalize_price_bounds(model.sku_levels_, price_bounds)
     X = control_matrix_for_skus(model, controls_df)
+    # One future-period shock for every SKU and every price tried.
+    lambda_obs = model._period_effect_draws(
+        1, period_effect=period_effect, random_seed=random_seed
+    )
 
     rows: list[dict[str, Any]] = []
     at_bound_skus: dict[Any, str] = {}
@@ -276,6 +302,7 @@ def optimize_prices(
             price_high=high,
             X_row=X_row,
             at_period=at_period,
+            lambda_obs=lambda_obs,
             options=minimize_options,
         )
         mrev = mean_revenue_at_price(
@@ -284,6 +311,7 @@ def optimize_prices(
             sku_idx=i,
             X_row=X_row,
             at_period=at_period,
+            lambda_obs=lambda_obs,
         )
 
         tol = 1e-3 * (high - low)

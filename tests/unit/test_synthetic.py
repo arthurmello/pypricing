@@ -357,3 +357,65 @@ def test_cross_prices_use_observed_log_prices():
     residuals = np.asarray(residuals)
     assert np.std(cross_terms) > 2.0 * noise_sigma
     assert np.std(residuals) == pytest.approx(noise_sigma, rel=0.25)
+
+
+def test_common_shock_defaults_do_not_change_a_seeded_panel():
+    kwargs = dict(n_periods=8, n_skus=3, random_state=1, include_seasonality=False)
+    baseline = generate_mock_data(**kwargs)
+    explicit = generate_mock_data(
+        **kwargs, common_shock_sigma=0.0, common_endogeneity=0.0
+    )
+    pd.testing.assert_frame_equal(baseline, explicit)
+
+
+def test_common_shock_is_shared_and_loaded_onto_price_and_quantity():
+    noise_sigma = 0.01
+    df, truth = generate_mock_data(
+        n_periods=6,
+        n_skus=25,
+        common_shock_sigma=0.4,
+        common_endogeneity=1.3,
+        noise_sigma=noise_sigma,
+        include_seasonality=False,
+        true_elasticity=-1.0,
+        random_state=0,
+        return_truth=True,
+    )
+    assert truth.lambda_period is not None
+    assert truth.lambda_period.shape == (6,)
+    assert float(np.std(truth.lambda_period)) > 0.05
+    label_to_i = {lab: i for i, lab in enumerate(truth.sku_labels)}
+    resid = np.empty((25, 6))
+    for s, sku in enumerate(truth.sku_labels):
+        rows = df[df["sku"] == sku].sort_values("period")
+        i = label_to_i[sku]
+        resid[s] = (
+            rows["log_quantity"].to_numpy()
+            - truth.alpha_sku[i]
+            - truth.elasticity_sku[i] * rows["log_price"].to_numpy()
+        )
+    assert np.allclose(resid.mean(axis=0), truth.lambda_period, atol=0.01)
+
+
+def test_common_shock_by_region_draws_a_separate_path():
+    _df, truth = generate_mock_data(
+        n_periods=5,
+        n_skus=2,
+        n_regions=2,
+        common_shock_sigma=0.3,
+        common_shock_by_region=True,
+        random_state=0,
+        return_truth=True,
+    )
+    assert truth.lambda_period is not None
+    assert truth.lambda_period.shape == (2, 5)
+    assert not np.allclose(truth.lambda_period[0], truth.lambda_period[1])
+
+
+def test_common_shock_validation():
+    with pytest.raises(ValueError, match="non-negative"):
+        generate_mock_data(n_periods=4, n_skus=2, common_shock_sigma=-0.1)
+    with pytest.raises(ValueError, match="n_regions"):
+        generate_mock_data(
+            n_periods=4, n_skus=2, common_shock_by_region=True, common_shock_sigma=0.2
+        )

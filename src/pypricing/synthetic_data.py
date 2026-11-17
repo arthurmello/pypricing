@@ -48,6 +48,9 @@ class MockDataTruth:
     instrument_coef: float = 0.0
     endogeneity: float = 0.0
     promo_elasticity: float | None = None
+    lambda_period: np.ndarray | None = None
+    common_shock_sigma: float = 0.0
+    common_endogeneity: float = 0.0
 
 
 @dataclass
@@ -84,11 +87,19 @@ class _PanelSim:
     n_instruments: int
     instrument_coef: float
     endogeneity: float
+    common_endogeneity: float
+    lambda_period: np.ndarray
     noise_sigma: float
     promotions: bool = False
     promo_frequency: float = 0.3
     promo_depth: float = 0.2
     promo_elasticity: float = -3.5
+
+    def lambda_at(self, region: int) -> np.ndarray:
+        """Period shock for one region. 1-d when the shock is national."""
+        if self.lambda_period.ndim == 2:
+            return self.lambda_period[region]
+        return self.lambda_period
 
 
 def _as_rng(random_state: RandomState) -> np.random.Generator:
@@ -417,6 +428,7 @@ def _draw_observed_log_prices(
                 instruments_panel[s, r] = instruments
             if sim.endogeneity:
                 log_price = log_price + sim.endogeneity * demand_shock
+            log_price = log_price + sim.common_endogeneity * sim.lambda_at(r)
             if sim.n_controls:
                 assert controls_panel is not None
                 controls_panel[s, r] = rng.normal(size=(n_periods, sim.n_controls))
@@ -495,6 +507,7 @@ def _simulate_panel_rows(
                 + ctrl_term
                 + trend_term
                 + demand_shock
+                + sim.lambda_at(r)
             )
             mean_log_q = _mean_log_quantity(
                 demand_shape=sim.demand_shape,
@@ -587,6 +600,10 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    common_shock_sigma: float = 0.0,
+    common_endogeneity: float = 0.0,
+    common_shock_by_region: bool = False,
+    mundlak_coef: float = 0.0,
     noise_sigma: float | None = None,
     promotions: bool = False,
     promo_frequency: float = 0.3,
@@ -618,6 +635,10 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    common_shock_sigma: float = 0.0,
+    common_endogeneity: float = 0.0,
+    common_shock_by_region: bool = False,
+    mundlak_coef: float = 0.0,
     noise_sigma: float | None = None,
     promotions: bool = False,
     promo_frequency: float = 0.3,
@@ -648,6 +669,10 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    common_shock_sigma: float = 0.0,
+    common_endogeneity: float = 0.0,
+    common_shock_by_region: bool = False,
+    mundlak_coef: float = 0.0,
     noise_sigma: float | None = None,
     promotions: bool = False,
     promo_frequency: float = 0.3,
@@ -739,6 +764,22 @@ def generate_mock_data(
     endogeneity
         Loading of the demand shock onto log-price (default ``0.0`` = exogenous
         prices). Positive values bias associational elasticity toward zero.
+    common_shock_sigma
+        Std of a period shock λ shared by every SKU (default ``0.0``, off).
+        With ``common_shock_by_region``, one shock is drawn per region and period.
+        ``0`` leaves the panel unchanged and does not touch the random stream.
+    common_endogeneity
+        Loading of λ onto log price (default ``0.0``). Log quantity always
+        gets λ with coefficient 1. Positive values make high-demand periods
+        high-price periods and bias elasticity toward zero when the model has
+        no period effect.
+    common_shock_by_region
+        If ``True``, draw a separate λ per region (requires ``n_regions``).
+        If ``False``, one national λ is shared by every region.
+    mundlak_coef
+        Shift each SKU intercept by this coefficient times the SKU's centered
+        mean log price (default ``0.0``). Creates the correlation between
+        baseline demand and price level that hierarchical intercepts shrink away.
     noise_sigma
         Std of the Gaussian demand shock (default ``0.12``).
     promotions
@@ -786,6 +827,10 @@ def generate_mock_data(
 
     if price_shock_sigma <= 0:
         raise ValueError("price_shock_sigma must be positive")
+    if common_shock_sigma < 0:
+        raise ValueError("common_shock_sigma must be non-negative")
+    if common_shock_by_region and n_regions is None:
+        raise ValueError("common_shock_by_region requires n_regions")
     if volume_trend != 0.0 and start_date is None:
         raise ValueError("volume_trend requires start_date")
     if noise_sigma is None:
@@ -844,6 +889,19 @@ def generate_mock_data(
         price_shock_sigma=price_shock_sigma,
     )
 
+    if common_shock_sigma == 0.0:
+        shape = (n_reg, n_periods) if common_shock_by_region else (n_periods,)
+        lambda_period = np.zeros(shape)
+    elif common_shock_by_region:
+        lambda_period = rng.normal(0.0, common_shock_sigma, size=(n_reg, n_periods))
+    else:
+        lambda_period = rng.normal(0.0, common_shock_sigma, size=n_periods)
+    if mundlak_coef:
+        sku_mean_log_p = log_price_panel.mean(axis=(1, 2))
+        centered_log_p = sku_mean_log_p - float(sku_mean_log_p.mean())
+        effects.intercept = np.asarray(effects.intercept, dtype=np.float64) + (
+            float(mundlak_coef) * centered_log_p
+        )
     gamma_map: dict[tuple[int, int], float] | None = None
     if ce is not None:
         gamma_map = _draw_cross_gamma_map(
@@ -877,6 +935,8 @@ def generate_mock_data(
             n_instruments=int(n_instruments),
             instrument_coef=float(instrument_coef),
             endogeneity=float(endogeneity),
+            common_endogeneity=float(common_endogeneity),
+            lambda_period=lambda_period,
             noise_sigma=float(noise_sigma),
             promotions=bool(promotions),
             promo_frequency=float(promo_frequency),
@@ -911,5 +971,8 @@ def generate_mock_data(
         instrument_coef=float(instrument_coef),
         endogeneity=float(endogeneity),
         promo_elasticity=None if not promotions else float(true_promo_elasticity),
+        lambda_period=np.asarray(lambda_period, dtype=np.float64).copy(),
+        common_shock_sigma=float(common_shock_sigma),
+        common_endogeneity=float(common_endogeneity),
     )
     return df, truth

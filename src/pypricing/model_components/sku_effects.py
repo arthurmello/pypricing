@@ -22,6 +22,7 @@ def get_sku_effect(
     mu_default_sigma: float,
     level_scale_default_sigma: float = 1.0,
     sku_scale_default_sigma: float = 1.0,
+    mean_shift: Any = None,
 ) -> Any:
     """
     Build ``{basename}_sku`` inside an active ``pm.Model``.
@@ -40,13 +41,15 @@ def get_sku_effect(
             mu_default_sigma=mu_default_sigma,
             level_scale_default_sigma=level_scale_default_sigma,
             sku_scale_default_sigma=sku_scale_default_sigma,
+            mean_shift=mean_shift,
         )
         return pm.Deterministic(param_name, lin, dims="sku")
 
+    mu = mu_default_mu if mean_shift is None else mu_default_mu + mean_shift
     return resolve_prior(
         model_config=model_config,
         param_name=param_name,
         default_dist=pm.Normal,
-        default_kwargs={"mu": mu_default_mu, "sigma": mu_default_sigma},
+        default_kwargs={"mu": mu, "sigma": mu_default_sigma},
         dims="sku",
     )

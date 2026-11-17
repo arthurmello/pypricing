@@ -17,8 +17,11 @@ from pypricing.model_components.hierarchical_effects import (
 from pypricing.model_components.priors import resolve_prior
 
 TrendKind = Literal["sku", "shared"]
+TimeEffectsKind = Literal["period", "region_period"]
 SeasonComponent = Literal["yearly", "weekly"]
 PanelFrequency = Literal["D", "W", "M", "Q", "irregular"]
+_PERIOD_EFFECT_SIGMA = 0.5
+_REGION_PERIOD_EFFECT_SIGMA = 0.25
 
 _TREND_PRIOR_SIGMA = 0.05
 _SEASON_PRIOR_SIGMA = 0.5
@@ -119,6 +122,62 @@ def fourier_features(
     if not cols:
         return np.empty((n, 0), dtype=np.float64), ()
     return np.column_stack(cols).astype(np.float64), tuple(names)
+
+
+def get_period_effect_term(
+    model_config: dict[str, Any] | None,
+    data: PricePanelData,
+    kind: TimeEffectsKind | None,
+    *,
+    param_suffix: str = "",
+) -> Any:
+    """Additive period effect in log-quantity (or in the price equation).
+
+    ``kind="period"`` is one zero-sum λ per period, shared by every SKU.
+    ``kind="region_period"`` adds a zero-sum region-by-period deviation on top
+    of that national effect. ``param_suffix`` (for example ``"_price"``) gives
+    the first stage its own period effects, so the control-function residual is
+    price variation left after conditioning on the period.
+    """
+    if kind is None:
+        return 0.0
+    if data.obs_period_idx is None or data.period_levels is None:
+        raise ValueError("time_effects requires a period column")
+
+    sigma_name = f"sigma_lambda_period{param_suffix}"
+    lambda_name = f"lambda_period{param_suffix}"
+    sigma = resolve_prior(
+        model_config=model_config,
+        param_name=sigma_name,
+        default_dist=pm.HalfNormal,
+        default_kwargs={"sigma": _PERIOD_EFFECT_SIGMA},
+    )
+    lam = pm.ZeroSumNormal(lambda_name, sigma=sigma, dims="period")
+    term = lam[pt.constant(data.obs_period_idx)]
+    if kind == "period":
+        return term
+    if kind != "region_period":
+        raise ValueError(
+            f"time_effects must be 'period' or 'region_period'; got {kind!r}"
+        )
+    if data.obs_region_idx is None or data.region_levels is None:
+        raise ValueError("time_effects='region_period' requires a region column")
+
+    sigma_region = resolve_prior(
+        model_config=model_config,
+        param_name=f"sigma_lambda_region_period{param_suffix}",
+        default_dist=pm.HalfNormal,
+        default_kwargs={"sigma": _REGION_PERIOD_EFFECT_SIGMA},
+    )
+    lam_region = pm.ZeroSumNormal(
+        f"lambda_region_period{param_suffix}",
+        sigma=sigma_region,
+        n_zerosum_axes=2,
+        dims=("region", "period"),
+    )
+    return term + lam_region[
+        pt.constant(data.obs_region_idx), pt.constant(data.obs_period_idx)
+    ]
 
 
 def get_trend_term(

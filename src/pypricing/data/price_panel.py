@@ -32,6 +32,15 @@ def _is_datetime_like(series: pd.Series) -> bool:
     )
 
 
+def _index_codes(values: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Categorical codes in row order, plus the category labels."""
+    cat = pd.Categorical(values)
+    codes = cat.codes.astype(np.int64)
+    if (codes < 0).any():
+        raise ValueError(f"Missing values in {values.name or 'index'} column")
+    return codes, np.asarray(cat.categories)
+
+
 def parse_period_index(
     values: pd.Series | pd.Index | np.ndarray | list[Any],
     *,
@@ -469,6 +478,14 @@ class PricePanelData:
     """Directed pair / pool index when cross-elasticity is enabled."""
     period_index: pd.DatetimeIndex | None = None
     """Row-aligned timestamps when ``period_col`` is datetime (or parsed)."""
+    obs_period_idx: np.ndarray | None = None
+    """Row-aligned index into ``period_levels``. ``None`` when there is no period column."""
+    period_levels: np.ndarray | None = None
+    """Unique period labels, in the order of ``obs_period_idx`` codes."""
+    obs_region_idx: np.ndarray | None = None
+    """Row-aligned index into ``region_levels``. ``None`` when ``region_col`` is unset."""
+    region_levels: np.ndarray | None = None
+    """Unique region labels, in the order of ``obs_region_idx`` codes."""
 
     @property
     def n_iv(self) -> int:
@@ -648,6 +665,16 @@ class PricePanelData:
                 df[period_col], period_col=period_col
             )
 
+        obs_period_idx: np.ndarray | None = None
+        period_levels: np.ndarray | None = None
+        if period_col in df.columns:
+            obs_period_idx, period_levels = _index_codes(df[period_col])
+        obs_region_idx: np.ndarray | None = None
+        region_levels: np.ndarray | None = None
+        region_col = cols.region_col
+        if region_col is not None and region_col in df.columns:
+            obs_region_idx, region_levels = _index_codes(df[region_col])
+
         return cls(
             log_price=log_price,
             log_quantity=log_quantity,
@@ -663,6 +690,10 @@ class PricePanelData:
             log_discount_index=log_discount_index,
             hierarchy=hierarchy,
             period_index=period_index,
+            obs_period_idx=obs_period_idx,
+            period_levels=period_levels,
+            obs_region_idx=obs_region_idx,
+            region_levels=region_levels,
         )
 
     @staticmethod
@@ -764,4 +795,8 @@ class PricePanelData:
             out["cross_pool"] = np.arange(self.n_cross_pool, dtype=np.int64)
         if self.n_iv > 0:
             out["iv"] = np.arange(self.n_iv, dtype=np.int64)
+        if self.period_levels is not None:
+            out["period"] = np.asarray(self.period_levels)
+        if self.region_levels is not None:
+            out["region"] = np.asarray(self.region_levels)
         return out

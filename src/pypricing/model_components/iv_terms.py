@@ -12,7 +12,9 @@ from pypricing.model_components.global_terms import get_controls_term, get_linea
 from pypricing.model_components.priors import resolve_prior
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.time_terms import (
+    TimeEffectsKind,
     TrendKind,
+    get_period_effect_term,
     get_season_term,
     get_trend_term,
 )
@@ -24,6 +26,7 @@ def get_control_function_term(
     trend: TrendKind | None,
     t0: Any,
     seasonality_components: tuple[str, ...] | None,
+    time_effects: TimeEffectsKind | None = None,
 ) -> Any:
     """Price equation residual times shared ``rho``; 0.0 when there are no instruments.
 
@@ -67,6 +70,14 @@ def get_control_function_term(
         components=seasonality_components,
         param_name="beta_season_price",
     )
+    # Own period effects, not the demand λ: the residual must be conditional
+    # on the period, so it is within-period price variation.
+    period_price = get_period_effect_term(
+        model_config,
+        data,
+        time_effects,
+        param_suffix="_price",
+    )
 
     mu_price = (
         alpha_price_sku[obs_sku]
@@ -74,6 +85,7 @@ def get_control_function_term(
         + controls_price
         + trend_price
         + season_price
+        + period_price
     )
     sigma_price = resolve_prior(
         model_config=model_config,

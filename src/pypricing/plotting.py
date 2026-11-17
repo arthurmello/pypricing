@@ -90,6 +90,7 @@ def _sku_price_grid_predictions(
     hdi_prob: float,
     random_seed: int | None = None,
     at_period: Any = None,
+    period_effect: Any = "neutral",
 ) -> tuple[pd.DataFrame, Any]:
     """Predict quantity along ``price_grid`` for one SKU; return ``(pred_df, sku_value)``."""
     price_grid_arr, _, _, _, sku_value = _sku_price_grid_design(
@@ -117,7 +118,12 @@ def _sku_price_grid_predictions(
         )
         df_pred[model.period_col] = ts
 
-    pred = model.predict(df_pred, hdi_prob=hdi_prob, random_seed=random_seed)
+    pred = model.predict(
+        df_pred,
+        hdi_prob=hdi_prob,
+        random_seed=random_seed,
+        period_effect=period_effect,
+    )
     return pred, sku_value
 
 
@@ -397,7 +403,9 @@ def plot_response_curve(
     price_grid: Iterable[float],
     controls: dict[str, float] | None = None,
     at_period: Any = None,
+    period_effect: Any = "neutral",
     hdi_prob: float = 0.9,
+    random_seed: int | None = None,
     ax=None,
 ):
     """
@@ -418,6 +426,8 @@ def plot_response_curve(
         controls,
         hdi_prob=hdi_prob,
         at_period=at_period,
+        period_effect=period_effect,
+        random_seed=random_seed,
     )
 
     ax.plot(
@@ -463,10 +473,12 @@ def plot_local_elasticity_vs_price(
     in price and aligns with ``elasticity_sku``.
 
     Posterior uncertainty is shown by taking the central difference per posterior
-    draw, then summarizing with mean and HDI at each price.
+    draw, then summarizing with mean and HDI at each price. A period shock
+    shifts both sides of that difference by the same amount, so it does not
+    change the curve.
 
-    Parameters match :func:`plot_response_curve` plus optional ``fd_step`` for
-    the log-price step in the finite difference (default: scale with ``|log p|``).
+    ``fd_step`` is the log-price step in the finite difference (default: scale
+    with ``|log p|``).
 
     Raises
     ------
@@ -532,6 +544,7 @@ def plot_revenue_vs_price(
     price_grid: Iterable[float],
     controls: dict[str, float] | None = None,
     at_period: Any = None,
+    period_effect: Any = "neutral",
     hdi_prob: float = 0.9,
     random_seed: int | None = None,
     ax=None,
@@ -558,6 +571,7 @@ def plot_revenue_vs_price(
         hdi_prob=hdi_prob,
         random_seed=random_seed,
         at_period=at_period,
+        period_effect=period_effect,
     )
 
     p = pred[model.price_col].to_numpy(dtype=float)
@@ -707,6 +721,8 @@ def plot_optimization_summary(
     reference_prices: Mapping[Any, float] | pd.Series | None = None,
     controls_df: pd.DataFrame | None = None,
     at_period: Any = None,
+    period_effect: Any = "neutral",
+    random_seed: int | None = None,
     include_revenue_comparison: bool = True,
     ax=None,
 ) -> tuple[Any, Any | None]:
@@ -783,6 +799,9 @@ def plot_optimization_summary(
     ref_revenues: np.ndarray | None = None
     if show_revenue:
         X = control_matrix_for_skus(model, controls_df)
+        lambda_obs = model._period_effect_draws(
+            1, period_effect=period_effect, random_seed=random_seed
+        )
         ref_revenues = np.empty(n, dtype=float)
         for i in range(n):
             X_row = None if X is None else X[i : i + 1, :]
@@ -792,6 +811,7 @@ def plot_optimization_summary(
                 sku_idx=i,
                 X_row=X_row,
                 at_period=at_period,
+                lambda_obs=lambda_obs,
             )
 
     _draw_optimization_summary_bars(

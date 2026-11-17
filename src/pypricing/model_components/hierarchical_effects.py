@@ -21,6 +21,7 @@ def get_noncentered_hierarchical_effect_per_sku(
     mu_default_sigma: float,
     level_scale_default_sigma: float = 1.0,
     sku_scale_default_sigma: float = 1.0,
+    mean_shift: Any = None,
 ) -> Any:
     """
     Vector of length ``n_skus``: ``mu + sum_L sigma_L * eta_L[idx_L] + sigma_sku * eta_sku``.
@@ -42,6 +43,8 @@ def get_noncentered_hierarchical_effect_per_sku(
     )
 
     lin = pt.ones((n_skus,)) * mu
+    if mean_shift is not None:
+        lin = lin + mean_shift
 
     for level, n_g in enumerate(n_groups_per_level):
         sigma = resolve_prior(

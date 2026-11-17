@@ -32,7 +32,9 @@ from pypricing.data.price_panel import (
     read_discount_fraction,
     skus_without_variation,
 )
+from pypricing.model_components.priors import resolve_prior
 from pypricing.model_components.time_terms import (
+    TimeEffectsKind,
     TrendKind,
     fourier_features,
     infer_panel_frequency,
@@ -84,6 +86,47 @@ def _seasonality_to_json(
     return list(value)
 
 
+def _as_label_index(levels: np.ndarray) -> pd.Index:
+    index = pd.Index(levels)
+    if pd.api.types.is_datetime64_any_dtype(index):
+        return pd.DatetimeIndex(index)
+    return index
+
+
+def _label_codes(levels: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """``-1`` where ``values`` is not a training label."""
+    index = _as_label_index(levels)
+    keys = pd.Index(values)
+    if isinstance(index, pd.DatetimeIndex):
+        keys = pd.DatetimeIndex(pd.to_datetime(keys))
+    return index.get_indexer(keys).astype(np.int64)
+
+
+def _one_label_code(levels: np.ndarray, label: Any) -> int:
+    code = int(_label_codes(levels, np.asarray([label]))[0])
+    if code < 0:
+        raise ValueError(
+            f"period_effect label {label!r} is not a training period"
+        )
+    return code
+
+
+def _unknown_row_groups(
+    codes: np.ndarray, values: np.ndarray | None
+) -> list[np.ndarray]:
+    """Row positions whose period is not in the training sample, one array per label."""
+    unknown = np.flatnonzero(codes < 0)
+    if unknown.size == 0:
+        return []
+    if values is None:
+        return [unknown]
+    keys = pd.Series(np.asarray(values)[unknown])
+    return [
+        unknown[np.asarray(locator, dtype=np.int64)]
+        for locator in keys.groupby(keys, sort=False).indices.values()
+    ]
+
+
 class DemandModel:
     """Base class for Bayesian log-demand models on long-format price panels.
 
@@ -114,9 +157,21 @@ class DemandModel:
     seasonality
         Shared Fourier seasonality in log-quantity. ``None`` (default) omits it.
         ``"yearly"`` / ``"weekly"`` or a sequence of those add the corresponding
-        harmonics. ``"auto"`` picks components from the panel's date spacing
+        harmonics.         ``"auto"`` picks components from the panel's date spacing
         (daily → yearly+weekly; weekly/monthly → yearly). Requires datetime
         ``period``.
+    time_effects
+        Free period effects in log-quantity. ``None`` (default) omits them.
+        ``"period"`` is one zero-sum effect per period, shared by every SKU.
+        ``"region_period"`` adds a zero-sum region-by-period deviation and
+        requires ``panel_columns.region_col``. Cannot be combined with
+        ``trend`` or ``seasonality`` (a free period effect absorbs both).
+        Every period cell needs at least two SKUs.
+    mundlak
+        If ``True``, the SKU-intercept prior mean includes
+        ``gamma_mundlak`` times that SKU's centered mean log regular price.
+        Removes the shrinkage bias that appears when baseline demand is
+        correlated with a SKU's price level. Default ``False``.
     model_config
         Prior overrides keyed by parameter name, each
         ``{"dist": <PyMC dist>, "kwargs": {...}}``.
@@ -141,6 +196,8 @@ class DemandModel:
         cross_elasticity: CrossElasticitySpec | None = None,
         trend: TrendKind | None = None,
         seasonality: str | Sequence[str] | None = None,
+        time_effects: TimeEffectsKind | None = None,
+        mundlak: bool = False,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -151,10 +208,15 @@ class DemandModel:
         self.cross_elasticity = cross_elasticity
         self.trend = trend
         self.seasonality = normalize_seasonality(seasonality)
+        self.time_effects = time_effects
+        self.mundlak = bool(mundlak)
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.iv_names_: tuple[str, ...] = ()
         self.log_price_midpoint_sku_: np.ndarray | None = None
+        self.sku_mean_log_price_: np.ndarray | None = None
+        self.period_levels_: np.ndarray | None = None
+        self.region_levels_: np.ndarray | None = None
         self.data: pd.DataFrame | None = None
         self.cross_pairs_: CrossPairIndex | None = None
         self.t0_: pd.Timestamp | None = None
@@ -178,6 +240,8 @@ class DemandModel:
             cross_elasticity=self.cross_elasticity,
             trend=self.trend,
             seasonality=self.seasonality,
+            time_effects=self.time_effects,
+            mundlak=self.mundlak,
             model_config=self.model_config,
             sampler_config=self.sampler_config,
         )
@@ -238,6 +302,7 @@ class DemandModel:
         t_years: np.ndarray | None = None,
         X_season: np.ndarray | None = None,
         log_discount_index: np.ndarray | None = None,
+        lambda_obs: np.ndarray | None = None,
     ) -> np.ndarray:
         """Mean log-quantity. ``log_price`` is log regular price when discounts are used."""
         pass
@@ -254,6 +319,22 @@ class DemandModel:
             cross_elasticity=self.cross_elasticity,
             group_columns=self.panel_columns.group_columns,
         )
+        if self.time_effects not in (None, "period", "region_period"):
+            raise ValueError(
+                "time_effects must be None, 'period', or 'region_period'; "
+                f"got {self.time_effects!r}"
+            )
+        if self.time_effects is not None and (
+            self.trend is not None or self.seasonality is not None
+        ):
+            raise ValueError(
+                "time_effects cannot be combined with trend or seasonality; "
+                "a free period effect absorbs both"
+            )
+        if self.time_effects == "region_period" and self.panel_columns.region_col is None:
+            raise ValueError(
+                "time_effects='region_period' requires panel_columns.region_col"
+            )
 
     @property
     def default_model_config(self) -> dict:
@@ -313,6 +394,8 @@ class DemandModel:
             ),
             "trend": json.dumps(self.trend),
             "seasonality": json.dumps(_seasonality_to_json(self.seasonality)),
+            "time_effects": json.dumps(self.time_effects),
+            "mundlak": json.dumps(self.mundlak),
         }
 
     def set_idata_attrs(
@@ -380,6 +463,10 @@ class DemandModel:
         seasonality = (
             json.loads(attrs["seasonality"]) if "seasonality" in attrs else None
         )
+        time_effects = (
+            json.loads(attrs["time_effects"]) if "time_effects" in attrs else None
+        )
+        mundlak = json.loads(attrs["mundlak"]) if "mundlak" in attrs else False
         return {
             "model_config": cls._model_config_formatting(
                 json.loads(attrs["model_config"])
@@ -389,6 +476,8 @@ class DemandModel:
             "cross_elasticity": cross_elasticity,
             "trend": trend,
             "seasonality": seasonality,
+            "time_effects": time_effects,
+            "mundlak": mundlak,
         }
 
     @classmethod
@@ -447,6 +536,7 @@ class DemandModel:
 
     def build_model(self, data: pd.DataFrame) -> None:
         self._validate_configuration()
+        self._validate_time_effect_cells(data)
         cols = self.panel_columns
         if self.cross_elasticity is not None:
             if cols.period_col not in data.columns:
@@ -505,10 +595,16 @@ class DemandModel:
             self.cross_pairs_ = None
 
         mid = np.empty(panel.n_skus, dtype=np.float64)
+        means = np.empty(panel.n_skus, dtype=np.float64)
         for sku_idx in range(panel.n_skus):
             mask = panel.obs_sku_idx == sku_idx
-            mid[sku_idx] = float(np.median(panel.log_regular_price[mask]))
+            column = panel.log_regular_price[mask]
+            mid[sku_idx] = float(np.median(column))
+            means[sku_idx] = float(np.mean(column))
         self.log_price_midpoint_sku_ = mid
+        self.sku_mean_log_price_ = means if self.mundlak else None
+        self.period_levels_ = panel.period_levels
+        self.region_levels_ = panel.region_levels
 
         self.model = self._build_pymc_model(panel)
         self.sku_levels_ = panel.sku_levels
@@ -602,6 +698,11 @@ class DemandModel:
                 "sigma_price",
                 "alpha_price_sku",
                 "beta_control_price",
+                "lambda_period",
+                "sigma_lambda_period",
+                "lambda_region_period",
+                "sigma_lambda_region_period",
+                "gamma_mundlak",
             ]
             candidates.append("gamma_pair")
             var_names = [v for v in candidates if v in self.idata.posterior]
@@ -689,6 +790,27 @@ class DemandModel:
         from pypricing.diagnostics.identification import iv_diagnostics
 
         out.update(iv_diagnostics(self))
+        if self.time_effects is not None and self.data is not None:
+            from pypricing.diagnostics.identification import (
+                WITHIN_PERIOD_PRICE_SHARE_MIN,
+                within_period_price_share,
+            )
+
+            share = within_period_price_share(self)
+            out["within_period_price_share"] = share
+            out["weak_within_period_price"] = bool(
+                share < WITHIN_PERIOD_PRICE_SHARE_MIN
+            )
+            if out["weak_within_period_price"]:
+                from pypricing.diagnostics import DiagnosticWarning
+
+                warnings.warn(
+                    f"Only {share:.0%} of log-price variance is within period "
+                    f"(below {WITHIN_PERIOD_PRICE_SHARE_MIN:.0%}); elasticity "
+                    "rests on little identifying variation.",
+                    DiagnosticWarning,
+                    stacklevel=3,
+                )
         return out
 
     def graphviz(self):
@@ -722,7 +844,9 @@ class DemandModel:
         price_grid: Iterable[float],
         controls: dict[str, float] | None = None,
         at_period: pd.Timestamp | str | None = None,
+        period_effect: Any = "neutral",
         hdi_prob: float = 0.9,
+        random_seed: int | None = None,
         ax=None,
     ):
         from pypricing.plotting import plot_response_curve as _plot
@@ -733,7 +857,9 @@ class DemandModel:
             price_grid=price_grid,
             controls=controls,
             at_period=at_period,
+            period_effect=period_effect,
             hdi_prob=hdi_prob,
+            random_seed=random_seed,
             ax=ax,
         )
 
@@ -768,6 +894,7 @@ class DemandModel:
         price_grid: Iterable[float],
         controls: dict[str, float] | None = None,
         at_period: pd.Timestamp | str | None = None,
+        period_effect: Any = "neutral",
         hdi_prob: float = 0.9,
         random_seed: int | None = None,
         ax=None,
@@ -780,6 +907,7 @@ class DemandModel:
             price_grid=price_grid,
             controls=controls,
             at_period=at_period,
+            period_effect=period_effect,
             hdi_prob=hdi_prob,
             random_seed=random_seed,
             ax=ax,
@@ -792,6 +920,8 @@ class DemandModel:
         reference_prices: Any = None,
         controls_df: pd.DataFrame | None = None,
         at_period: pd.Timestamp | str | None = None,
+        period_effect: Any = "neutral",
+        random_seed: int | None = None,
         include_revenue_comparison: bool = True,
         ax=None,
     ):
@@ -803,6 +933,8 @@ class DemandModel:
             reference_prices=reference_prices,
             controls_df=controls_df,
             at_period=at_period,
+            period_effect=period_effect,
+            random_seed=random_seed,
             include_revenue_comparison=include_revenue_comparison,
             ax=ax,
         )
@@ -994,8 +1126,168 @@ class DemandModel:
             obs_sku_idx=obs_sku_idx,
         )
 
+    def _validate_time_effect_cells(self, data: pd.DataFrame) -> None:
+        if self.time_effects is None:
+            return
+        period_col = self.period_col
+        if period_col not in data.columns:
+            raise ValueError(f"time_effects requires column {period_col!r}")
+        keys = [period_col]
+        if self.time_effects == "region_period":
+            region_col = self.region_col
+            if region_col is None or region_col not in data.columns:
+                raise ValueError(
+                    "time_effects='region_period' requires column "
+                    f"{region_col!r}"
+                )
+            keys.append(region_col)
+        counts = data.groupby(keys, sort=False)[self.sku_col].nunique()
+        thin = counts[counts < 2]
+        if len(thin):
+            raise ValueError(
+                "time_effects needs at least 2 SKUs in every period cell so "
+                "the period effect is separate from price; "
+                f"{len(thin)} cell(s) have fewer"
+            )
+
+    def _pymc_coords(self, data: PricePanelData) -> dict[str, Any]:
+        coords = data.coords()
+        if self.time_effects is None:
+            coords.pop("period", None)
+            coords.pop("region", None)
+        elif self.time_effects == "period":
+            coords.pop("region", None)
+        return coords
+
+    def _mundlak_mean_shift(self) -> Any:
+        """``gamma_mundlak * centered mean log price``, or ``None`` when off.
+
+        Call inside an active ``pm.Model``. The shift is the prior mean of
+        ``alpha_sku`` only.
+        """
+        if not self.mundlak:
+            return None
+        if self.sku_mean_log_price_ is None:
+            raise RuntimeError("Missing sku_mean_log_price_; fit the model first.")
+        centered = np.asarray(self.sku_mean_log_price_, dtype=np.float64)
+        centered = centered - float(centered.mean())
+        gamma = resolve_prior(
+            model_config=self.model_config,
+            param_name="gamma_mundlak",
+            default_dist=pm.Normal,
+            default_kwargs={"mu": 0.0, "sigma": 2.0},
+        )
+        return gamma * pt.constant(centered)
+
+    def _period_effect_draws(
+        self,
+        n_obs: int,
+        *,
+        periods: np.ndarray | None = None,
+        regions: np.ndarray | None = None,
+        period_effect: Any = "neutral",
+        random_seed: int | None = None,
+    ) -> np.ndarray | None:
+        """Period-effect contribution, shape ``(chain, draw, n_obs)``.
+
+        Training periods use the fitted λ. Other periods follow ``period_effect``:
+        ``"neutral"`` is 0, ``"draw"`` is ``N(0, sigma_lambda)`` per posterior
+        draw and per distinct future period, and any other value reuses that
+        training period's λ.
+        """
+        if self.time_effects is None:
+            return None
+        self._require_fitted()
+        assert self.idata is not None and self.period_levels_ is not None
+        post = self.idata.posterior
+        lam = np.asarray(post["lambda_period"].values, dtype=np.float64)
+        n_chain, n_draw, _n_period = lam.shape
+        if periods is None:
+            codes = np.full(n_obs, -1, dtype=np.int64)
+        else:
+            codes = _label_codes(self.period_levels_, periods)
+        out = np.zeros((n_chain, n_draw, n_obs), dtype=np.float64)
+        known = codes >= 0
+        if known.any():
+            out[:, :, known] = lam[:, :, codes[known]]
+
+        groups = _unknown_row_groups(codes, periods)
+        rng = np.random.default_rng(random_seed)
+        if groups and period_effect == "draw":
+            sigma = np.asarray(post["sigma_lambda_period"].values, dtype=np.float64)
+            for rows in groups:
+                shock = rng.normal(size=(n_chain, n_draw)) * sigma
+                out[:, :, rows] = shock[:, :, None]
+        elif groups and period_effect != "neutral":
+            code = _one_label_code(self.period_levels_, period_effect)
+            for rows in groups:
+                out[:, :, rows] = lam[:, :, code][:, :, None]
+
+        if self.time_effects != "region_period":
+            return out
+        if regions is None:
+            raise ValueError(
+                "time_effects='region_period' requires a region column "
+                "on prediction data"
+            )
+        if self.region_levels_ is None or "lambda_region_period" not in post:
+            raise RuntimeError("Fitted model is missing region-period effects.")
+        region_codes = _label_codes(self.region_levels_, regions)
+        if (region_codes < 0).any():
+            bad = pd.unique(np.asarray(regions)[region_codes < 0]).tolist()
+            raise ValueError(f"Unknown region values in prediction data: {bad}")
+        lam_region = np.asarray(post["lambda_region_period"].values, dtype=np.float64)
+        if known.any():
+            out[:, :, known] = out[:, :, known] + lam_region[
+                :, :, region_codes[known], codes[known]
+            ]
+        if not groups:
+            return out
+        if period_effect == "neutral":
+            return out
+        if period_effect == "draw":
+            sigma_region = np.asarray(
+                post["sigma_lambda_region_period"].values, dtype=np.float64
+            )
+            for rows in groups:
+                for region_code in np.unique(region_codes[rows]):
+                    mask = region_codes[rows] == region_code
+                    shock = rng.normal(size=(n_chain, n_draw)) * sigma_region
+                    out[:, :, rows[mask]] = out[:, :, rows[mask]] + shock[:, :, None]
+            return out
+        code = _one_label_code(self.period_levels_, period_effect)
+        unknown = np.flatnonzero(codes < 0)
+        out[:, :, unknown] = out[:, :, unknown] + lam_region[
+            :, :, region_codes[unknown], code
+        ]
+        return out
+
+    def _prediction_period_values(
+        self, df: pd.DataFrame
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if self.time_effects is None:
+            return None, None
+        periods = (
+            df[self.period_col].to_numpy()
+            if self.period_col in df.columns
+            else None
+        )
+        if self.time_effects != "region_period":
+            return periods, None
+        region_col = self.region_col
+        if region_col is None or region_col not in df.columns:
+            raise ValueError(
+                "time_effects='region_period' requires a region column "
+                f"{region_col!r} on prediction data"
+            )
+        return periods, df[region_col].to_numpy()
+
     def sample_posterior_predictive(
-        self, df: pd.DataFrame, *, random_seed: int | None = None
+        self,
+        df: pd.DataFrame,
+        *,
+        random_seed: int | None = None,
+        period_effect: Any = "neutral",
     ) -> xr.Dataset:
         self._require_fitted()
         assert self.idata is not None
@@ -1006,6 +1298,14 @@ class DemandModel:
         X_cross = self._cross_matrix_for_frame(df, obs_sku_idx)
         t_years = self._t_years_for_frame(df)
         X_season = self._season_features_for_frame(df)
+        periods, regions = self._prediction_period_values(df)
+        lambda_obs = self._period_effect_draws(
+            log_price.shape[0],
+            periods=periods,
+            regions=regions,
+            period_effect=period_effect,
+            random_seed=random_seed,
+        )
         post = self.idata.posterior
         sigma = post["sigma"].values
         mu = self.compute_mu_from_posterior(
@@ -1017,6 +1317,7 @@ class DemandModel:
             t_years=t_years,
             X_season=X_season,
             log_discount_index=log_discount_index,
+            lambda_obs=lambda_obs,
         )
 
         rng = np.random.default_rng(random_seed)
@@ -1045,8 +1346,16 @@ class DemandModel:
         *,
         hdi_prob: float = 0.94,
         random_seed: int | None = None,
+        period_effect: Any = "neutral",
     ) -> pd.DataFrame:
-        ds = self.sample_posterior_predictive(df, random_seed=random_seed)
+        """Predict quantity. ``period_effect`` applies only to periods that were
+        not in the training sample: ``"neutral"`` (default) uses λ = 0,
+        ``"draw"`` draws λ ~ N(0, sigma_lambda) per posterior draw, and a
+        training period label reuses that period's fitted λ.
+        """
+        ds = self.sample_posterior_predictive(
+            df, random_seed=random_seed, period_effect=period_effect
+        )
         q = ds["quantity"]
         mean = q.mean(dim=("chain", "draw")).to_numpy()
         hdi = az.hdi(q, hdi_prob=hdi_prob)
@@ -1197,6 +1506,8 @@ class DemandModel:
         *,
         controls_df: pd.DataFrame | None = None,
         at_period: pd.Timestamp | str | None = None,
+        period_effect: Any = "neutral",
+        random_seed: int | None = None,
         minimize_options: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
         from pypricing.optimizer import optimize_prices as _optimize_prices
@@ -1207,6 +1518,8 @@ class DemandModel:
             price_bounds=price_bounds,
             controls_df=controls_df,
             at_period=at_period,
+            period_effect=period_effect,
+            random_seed=random_seed,
             minimize_options=minimize_options,
         )
 

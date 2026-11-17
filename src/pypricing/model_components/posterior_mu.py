@@ -56,6 +56,7 @@ def add_controls_and_cross(
     t_years: np.ndarray | None = None,
     obs_sku_idx: np.ndarray | None = None,
     X_season: np.ndarray | None = None,
+    lambda_obs: np.ndarray | None = None,
 ) -> np.ndarray:
     if X_control is not None:
         beta = posterior["beta_control"].values
@@ -67,4 +68,7 @@ def add_controls_and_cross(
         if obs_sku_idx is None:
             raise ValueError("obs_sku_idx is required when t_years is provided")
         mu = add_trend(mu, posterior, t_years, obs_sku_idx)
-    return add_season(mu, posterior, X_season)
+    mu = add_season(mu, posterior, X_season)
+    if lambda_obs is not None:
+        mu = mu + lambda_obs
+    return mu

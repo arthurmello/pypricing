@@ -76,6 +76,19 @@ assumes temporary discounts are not set in response to the demand shock.
 {func}`~pypricing.optimize_prices` use the structural demand curve (control
 residual set to 0). The IV correction is for **estimation** only.
 
+### Period effects
+
+A demand shock common to every SKU in a period is not fixed by an instrument
+for the SKU-level shock. `time_effects="period"` (or `"region_period"`) absorbs
+it. The control-function first stage gets its own period effects, so the
+residual is price variation left inside the period.
+
+What remains for the elasticity is within-period price variation, after SKU
+and period means. `run_diagnostics` reports that share as
+`within_period_price_share` and warns when it is below 10%: the elasticity is
+then resting on very little variation. SKU-by-period shocks that price reacts
+to are still an instruments problem; period effects do not replace them.
+
 ### Exclusion
 
 A valid instrument must move price without moving demand directly. Cost /

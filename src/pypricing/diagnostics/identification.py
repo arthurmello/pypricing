@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 # Rule of thumb for one endogenous regressor (Staiger and Stock).
 WEAK_IV_F_THRESHOLD = 10.0
 OVERID_ALPHA = 0.05
+# Below this, period effects soak up almost all price variation.
+WITHIN_PERIOD_PRICE_SHARE_MIN = 0.10
 
 
 def _lstsq_fit(y: np.ndarray, X: np.ndarray) -> tuple[np.ndarray, int]:
@@ -127,6 +129,21 @@ def first_stage_exogenous(model: DemandModel) -> np.ndarray:
     season = model._season_features_for_frame(data)
     if season is not None and season.size:
         parts.append(season)
+    if model.time_effects is not None and model.period_col in data.columns:
+        if (
+            model.time_effects == "region_period"
+            and model.region_col is not None
+            and model.region_col in data.columns
+        ):
+            cell = (
+                data[model.region_col].astype(str)
+                + "|"
+                + data[model.period_col].astype(str)
+            )
+            parts.append(pd.get_dummies(cell).to_numpy(dtype=np.float64))
+        else:
+            period = pd.Categorical(data[model.period_col])
+            parts.append(pd.get_dummies(period).to_numpy(dtype=np.float64))
     return np.column_stack(parts)
 
 
@@ -146,6 +163,49 @@ def _instruments_and_log_price(model: DemandModel) -> tuple[np.ndarray, np.ndarr
         discount = model.data[discount_col].to_numpy(dtype=np.float64)
     _log_paid, log_regular, _log_index = decompose_log_price(price, discount)
     return instruments, log_regular
+
+
+def within_period_price_share(model: DemandModel) -> float:
+    """Share of log-price variance left after removing SKU and period means.
+
+    With ``region_period``, the period cell is the region-period pair. The
+    share is what elasticity is identified from once those means are absorbed.
+    """
+    from pypricing.data.price_panel import decompose_log_price
+
+    assert model.data is not None and model.sku_levels_ is not None
+    data = model.data
+    price = data[model.price_col].to_numpy(dtype=np.float64)
+    discount = None
+    discount_col = model.panel_columns.discount_col
+    if discount_col is not None:
+        discount = data[discount_col].to_numpy(dtype=np.float64)
+    _paid, log_price, _index = decompose_log_price(price, discount)
+    total = float(np.var(log_price))
+    if total == 0.0:
+        return 0.0
+    sku = pd.Categorical(data[model.sku_col], categories=model.sku_levels_)
+    if (
+        model.time_effects == "region_period"
+        and model.region_col is not None
+        and model.region_col in data.columns
+    ):
+        cell = (
+            data[model.region_col].astype(str)
+            + "|"
+            + data[model.period_col].astype(str)
+        )
+    else:
+        cell = pd.Categorical(data[model.period_col])
+    dummies = np.column_stack(
+        [
+            pd.get_dummies(sku).to_numpy(dtype=np.float64),
+            pd.get_dummies(cell).to_numpy(dtype=np.float64),
+        ]
+    )
+    fitted, _ = _lstsq_fit(log_price, dummies)
+    resid = log_price - fitted
+    return float(np.var(resid) / total)
 
 
 def iv_diagnostics(model: DemandModel, *, hdi_prob: float = 0.9) -> dict[str, Any]:
