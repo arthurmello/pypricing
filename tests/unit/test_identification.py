@@ -43,6 +43,8 @@ def _stub_instrument_checks(monkeypatch: pytest.MonkeyPatch, *, includes_zero: b
         "pypricing.diagnostics.identification.iv_diagnostics",
         lambda model, hdi_prob=0.9: {
             "first_stage_f": 20.0,
+            "first_stage_r2_without": 0.4,
+            "first_stage_r2_with": 0.7,
             "weak_iv": False,
             "rho_mean": 0.1,
             "rho_hdi": (lo, hi),
@@ -59,6 +61,30 @@ def test_check_instruments_warns_when_rho_includes_zero(monkeypatch):
     _stub_instrument_checks(monkeypatch, includes_zero=True)
     with pytest.warns(DiagnosticWarning, match="No evidence of endogeneity"):
         check_instruments(_instrument_model(), compare_ols=False)
+
+
+def test_check_instruments_warns_when_the_first_stage_is_weak(monkeypatch):
+    def _diag(model, hdi_prob=0.9):
+        return {
+            "first_stage_f": 3.2,
+            "first_stage_r2_without": 0.50,
+            "first_stage_r2_with": 0.51,
+            "weak_iv": True,
+            "rho_mean": 0.4,
+            "rho_hdi": (0.1, 0.7),
+            "rho_hdi_includes_zero": False,
+        }
+
+    monkeypatch.setattr("pypricing.diagnostics.identification.iv_diagnostics", _diag)
+    monkeypatch.setattr(
+        "pypricing.diagnostics.identification._overid",
+        lambda model: {"applicable": False, "n_instruments": 1},
+    )
+    with pytest.warns(DiagnosticWarning, match="rule of thumb") as caught:
+        out = check_instruments(_instrument_model(), compare_ols=False)
+    assert out["first_stage"]["r2_without"] == pytest.approx(0.50)
+    assert out["first_stage"]["r2_with"] == pytest.approx(0.51)
+    assert len(caught) == 1
 
 
 def test_check_instruments_silent_when_rho_excludes_zero(monkeypatch):

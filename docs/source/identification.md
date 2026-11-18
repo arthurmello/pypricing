@@ -63,8 +63,12 @@ endogenous. An interval that includes 0 is no evidence of endogeneity, and
 the instrumented elasticities are noisier, so drop the instruments.
 `check_instruments()["first_stage"]["f"]` is the partial F for the
 instruments in the price equation, after SKU intercepts, controls, trend, and
-seasonality. `weak` is true when that F is below 10, the usual rule of thumb
-for one endogenous price. It is not a Stock–Yogo critical value. See
+seasonality. `r2_without` and `r2_with` are the R² of that equation without
+and with the instruments. `weak` is true when F is below 10, a rule of thumb
+for one endogenous price, not a guarantee the instruments are valid and not a
+Stock–Yogo critical value. A weak instrument can bias the corrected
+elasticities by more than fitting without instruments. A large F does not
+show that the instrument affects demand only through price. See
 [Diagnostics](diagnostics.md#instruments) for how to read all the instrument
 checks.
 

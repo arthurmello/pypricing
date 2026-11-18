@@ -117,7 +117,11 @@ def _summarize_sensitivity(report: DiagnosticsReport) -> str:
 
 def _summarize_instruments(report: DiagnosticsReport) -> str:
     out = report.instruments
-    text = f"first-stage F {out['first_stage']['f']:.1f}"
+    stage = out["first_stage"]
+    text = (
+        f"first-stage F {stage['f']:.1f}, "
+        f"R² {stage['r2_without']:.2f} without, {stage['r2_with']:.2f} with"
+    )
     overid = out["overid"]
     if overid["applicable"]:
         text += f", Sargan p {overid['p_value']:.2f}"

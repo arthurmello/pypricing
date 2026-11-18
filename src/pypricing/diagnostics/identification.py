@@ -42,6 +42,23 @@ def _as_2d(a: np.ndarray, n: int) -> np.ndarray:
     return a
 
 
+def _price_equation_fit(
+    log_price: np.ndarray,
+    instruments: np.ndarray,
+    exogenous: np.ndarray,
+) -> tuple[np.ndarray, float, float, int, int]:
+    """Residual sums of squares for log price without and with instruments."""
+    y = np.asarray(log_price, dtype=np.float64).reshape(-1)
+    n = y.shape[0]
+    Z = np.asarray(instruments, dtype=np.float64)
+    if Z.ndim == 1:
+        Z = Z.reshape(-1, 1)
+    X = _as_2d(exogenous, n)
+    ssr_r, rank_r = _ssr_and_rank(y, X)
+    ssr_u, rank_u = _ssr_and_rank(y, np.column_stack([X, Z]))
+    return y, ssr_r, ssr_u, rank_r, rank_u
+
+
 def first_stage_partial_f(
     log_price: np.ndarray,
     instruments: np.ndarray,
@@ -54,20 +71,34 @@ def first_stage_partial_f(
     that every instrument coefficient is zero. Instruments with no remaining
     variation return ``0``.
     """
-    y = np.asarray(log_price, dtype=np.float64).reshape(-1)
+    y, ssr_r, ssr_u, rank_r, rank_u = _price_equation_fit(
+        log_price, instruments, exogenous
+    )
     n = y.shape[0]
-    Z = np.asarray(instruments, dtype=np.float64)
-    if Z.ndim == 1:
-        Z = Z.reshape(-1, 1)
-    X = _as_2d(exogenous, n)
-    ssr_r, rank_r = _ssr_and_rank(y, X)
-    ssr_u, rank_u = _ssr_and_rank(y, np.column_stack([X, Z]))
     df_num = rank_u - rank_r
     df_den = n - rank_u
     if df_num <= 0 or df_den <= 0:
         return 0.0
     gap = max(ssr_r - ssr_u, 0.0)
     return (gap / df_num) / (ssr_u / df_den)
+
+
+def first_stage_r2(
+    log_price: np.ndarray,
+    instruments: np.ndarray,
+    exogenous: np.ndarray,
+) -> tuple[float, float]:
+    """R² of log price without the instruments, then with them.
+
+    Both are 0 when log price does not vary. The second is at least the first.
+    """
+    y, ssr_r, ssr_u, _, _ = _price_equation_fit(log_price, instruments, exogenous)
+    sst = float(((y - y.mean()) ** 2).sum())
+    if sst == 0.0:
+        return 0.0, 0.0
+    r2_without = 1.0 - ssr_r / sst
+    r2_with = 1.0 - min(ssr_u, ssr_r) / sst
+    return float(r2_without), float(r2_with)
 
 
 def sargan_test(
@@ -209,7 +240,7 @@ def within_period_price_share(model: DemandModel) -> float:
 
 
 def iv_diagnostics(model: DemandModel, *, hdi_prob: float = 0.9) -> dict[str, Any]:
-    """Endogeneity interval for ``rho`` and the first-stage partial F."""
+    """Endogeneity interval for ``rho``, plus first-stage F and R²."""
     assert model.idata is not None
     post = model.idata.posterior
     if "rho" not in post and "pi" not in post:
@@ -225,10 +256,12 @@ def iv_diagnostics(model: DemandModel, *, hdi_prob: float = 0.9) -> dict[str, An
         out["rho_hdi_includes_zero"] = bool(lo <= 0.0 <= hi)
     if model.iv_names_ and model.data is not None:
         instruments, log_price = _instruments_and_log_price(model)
-        f_stat = first_stage_partial_f(
-            log_price, instruments, first_stage_exogenous(model)
-        )
+        exogenous = first_stage_exogenous(model)
+        f_stat = first_stage_partial_f(log_price, instruments, exogenous)
+        r2_without, r2_with = first_stage_r2(log_price, instruments, exogenous)
         out["first_stage_f"] = f_stat
+        out["first_stage_r2_without"] = r2_without
+        out["first_stage_r2_with"] = r2_with
         out["weak_iv"] = bool(f_stat < WEAK_IV_F_THRESHOLD)
     return out
 
@@ -256,11 +289,14 @@ def check_instruments(
     """First-stage strength, overidentification test, and IV vs OLS elasticities.
 
     Warns when the first stage is weak (F below 10), the Sargan test rejects
-    (p below 0.05), or ``rho``'s interval includes 0. An interval covering 0
-    is no evidence of endogeneity, and the instrumented elasticities are
-    noisier than the fit without instruments. The Sargan test uses a pooled
-    linear 2SLS demand equation, not the fitted curve, so it checks whether
-    the instruments agree with each other rather than the model's exact
+    (p below 0.05), or ``rho``'s interval includes 0. F below 10 is a rule of
+    thumb: weak instruments can bias the corrected elasticities by more than
+    a fit without them, and a large F does not show that an instrument affects
+    demand only through price. An interval for ``rho`` covering 0 is no
+    evidence of endogeneity, and the instrumented elasticities are noisier
+    than the fit without instruments. The Sargan test uses a pooled linear
+    2SLS demand equation, not the fitted curve, so it checks whether the
+    instruments agree with each other rather than the model's exact
     specification.
 
     With ``compare_ols``, refits the model without instruments on the same
@@ -273,12 +309,20 @@ def check_instruments(
         )
 
     diag = iv_diagnostics(model, hdi_prob=hdi_prob)
-    first_stage = {"f": diag["first_stage_f"], "weak": diag["weak_iv"]}
+    first_stage = {
+        "f": diag["first_stage_f"],
+        "r2_without": diag["first_stage_r2_without"],
+        "r2_with": diag["first_stage_r2_with"],
+        "weak": diag["weak_iv"],
+    }
     if first_stage["weak"]:
         warnings.warn(
             f"Weak instruments: first-stage F = {first_stage['f']:.1f} "
-            f"(< {WEAK_IV_F_THRESHOLD:.0f}). IV estimates will be noisy and "
-            "pulled toward OLS.",
+            f"(< {WEAK_IV_F_THRESHOLD:.0f}). "
+            f"F below {WEAK_IV_F_THRESHOLD:.0f} is a rule of thumb, not proof "
+            "the instruments are valid. Weak instruments can bias the corrected "
+            "elasticities by more than a fit without them. Reconsider the "
+            "instruments, or drop them.",
             DiagnosticWarning,
             stacklevel=3,
         )

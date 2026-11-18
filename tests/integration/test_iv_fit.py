@@ -64,6 +64,7 @@ def test_iv_fit_predict_optimize(model_cls, shape):
     assert "first_stage_f" in diag
     assert np.isfinite(diag["first_stage_f"])
     assert diag["weak_iv"] == (diag["first_stage_f"] < 10.0)
+    assert diag["first_stage_r2_with"] + 1e-8 >= diag["first_stage_r2_without"]
 
     df_pred = df.drop(columns=["quantity"]).copy()
     out = model.predict(df_pred, hdi_prob=0.9, random_seed=123)

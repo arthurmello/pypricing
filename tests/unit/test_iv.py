@@ -15,6 +15,7 @@ from pypricing import (
 from pypricing.diagnostics.identification import (
     WEAK_IV_F_THRESHOLD,
     first_stage_partial_f,
+    first_stage_r2,
 )
 
 _IV_MODELS = (
@@ -79,3 +80,31 @@ def test_first_stage_partial_f_is_zero_when_instrument_duplicates_a_control():
     y = x[:, 0] + rng.normal(scale=0.2, size=n)
     got = first_stage_partial_f(y, x, x)
     assert got == pytest.approx(0.0, abs=1e-8)
+
+
+def test_first_stage_r2_rises_when_the_instrument_moves_price():
+    rng = np.random.default_rng(0)
+    n = 200
+    z = rng.normal(size=n)
+    y = 0.8 * z + rng.normal(scale=0.1, size=n)
+    without, with_iv = first_stage_r2(y, z, np.ones((n, 1)))
+    assert without == pytest.approx(0.0, abs=1e-8)
+    assert with_iv > 0.8
+
+
+def test_first_stage_r2_barely_moves_for_an_irrelevant_instrument():
+    rng = np.random.default_rng(1)
+    n = 400
+    z = rng.normal(size=n)
+    y = rng.normal(size=n)
+    without, with_iv = first_stage_r2(y, z, np.ones((n, 1)))
+    assert with_iv == pytest.approx(without, abs=0.02)
+
+
+def test_first_stage_r2_is_unchanged_when_instrument_duplicates_a_control():
+    rng = np.random.default_rng(2)
+    n = 80
+    x = rng.normal(size=(n, 1))
+    y = x[:, 0] + rng.normal(scale=0.2, size=n)
+    without, with_iv = first_stage_r2(y, x, x)
+    assert with_iv == pytest.approx(without, abs=1e-8)

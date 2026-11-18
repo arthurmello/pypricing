@@ -326,6 +326,7 @@ def test_check_instruments_reports_all_sections():
     out = model.check_instruments()
 
     assert out["first_stage"]["f"] > 0
+    assert out["first_stage"]["r2_with"] + 1e-8 >= out["first_stage"]["r2_without"]
     assert out["overid"]["applicable"]
     assert out["overid"]["n_instruments"] == 2
     assert 0.0 <= out["overid"]["p_value"] <= 1.0

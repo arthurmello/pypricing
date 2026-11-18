@@ -146,8 +146,13 @@ out = model.check_instruments(compare_ols=False)  # instant, no IV vs OLS compar
 ```
 
 - `first_stage`: how strongly the instruments move price, after the other
-  covariates. An F below 10 means weak instruments: the estimates will be noisy
-  and pulled toward the uncorrected ones.
+  covariates. `f` is the partial F. `r2_without` is the R² of log price on
+  those covariates alone; `r2_with` adds the instruments. The gap is the price
+  variation the instruments add. An F below 10 is a rule of thumb for weak
+  instruments, not proof they are valid: the corrected elasticities can be
+  more biased than a fit without instruments, so reconsider or drop them.
+  A large F still does not show that an instrument affects demand only through
+  price.
 - `overid`: the Sargan test, available with two or more instruments. Each
   instrument implies its own elasticity; a p-value below 0.05 means they
   disagree, so at least one may affect demand through something other than
