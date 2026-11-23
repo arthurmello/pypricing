@@ -117,13 +117,17 @@ class IVMethod:
             )
         return AssumptionReport(method=self.name, assumptions=tuple(assumptions))
 
-    def quick_estimate(self, model: DemandModel) -> QuickEstimate:
+    def quick_estimate(
+        self, model: DemandModel, report: AssumptionReport | None = None
+    ) -> QuickEstimate:
         """Pooled control-function elasticity: log quantity on price and the residual.
 
-        Raises when :meth:`check_assumptions` returns ``not identified``.
-        A ``weak`` verdict still returns the estimate.
+        Raises when the assumption verdict is ``not identified``. A ``weak``
+        verdict still returns the estimate. Pass ``report`` to reuse a check
+        that already ran.
         """
-        report = self.check_assumptions(model)
+        if report is None:
+            report = self.check_assumptions(model)
         if report.verdict() == "not identified":
             failed = [item.detail for item in report.assumptions if item.status == "fail"]
             raise ValueError("IV is not identified: " + " ".join(failed))
@@ -147,8 +151,10 @@ class IVMethod:
         t0: Any,
         seasonality_components: tuple[str, ...] | None,
         time_effects: TimeEffectsKind | None = None,
+        model: DemandModel | None = None,
     ) -> Any:
         """``rho * residual`` inside the PyMC demand mean, or 0 with no instruments."""
+        del model
         return get_control_function_term(
             model_config,
             data,

@@ -159,16 +159,10 @@ def _instruments_and_log_price(model: DemandModel) -> tuple[np.ndarray, np.ndarr
     The control function instruments regular price. The discount index is treated
     as exogenous and is not part of this first stage.
     """
-    from pypricing.data.price_panel import decompose_log_price
+    from pypricing.endogeneity.design import log_regular_price
 
     instruments = model.data.loc[:, list(model.iv_names_)].to_numpy(dtype=np.float64)
-    price = model.data[model.price_col].to_numpy(dtype=np.float64)
-    discount_col = model.panel_columns.discount_col
-    discount = None
-    if discount_col is not None:
-        discount = model.data[discount_col].to_numpy(dtype=np.float64)
-    _log_paid, log_regular, _log_index = decompose_log_price(price, discount)
-    return instruments, log_regular
+    return instruments, log_regular_price(model)
 
 
 def within_period_price_share(model: DemandModel) -> float:

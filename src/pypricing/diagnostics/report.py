@@ -243,8 +243,13 @@ def run_diagnostics(
     else:
         report.skipped["sensitivity"] = "disabled"
 
+    method_name = getattr(model.endogeneity_method_, "name", None)
     if not instruments:
         report.skipped["instruments"] = "disabled"
+    elif method_name not in (None, "iv"):
+        report.skipped["instruments"] = (
+            "the endogeneity correction is not instrumental variables"
+        )
     elif not model.iv_names_:
         report.skipped["instruments"] = "model has no instruments"
     else:

@@ -11,6 +11,24 @@ if TYPE_CHECKING:
     from pypricing.models.basic import DemandModel
 
 
+def log_regular_price(model: DemandModel) -> np.ndarray:
+    """Log regular price in training-row order.
+
+    With no discount column this is log paid price. The discount index is not
+    part of the endogenous regressor.
+    """
+    from pypricing.data.price_panel import decompose_log_price
+
+    assert model.data is not None
+    price = model.data[model.price_col].to_numpy(dtype=np.float64)
+    discount = None
+    discount_col = model.panel_columns.discount_col
+    if discount_col is not None:
+        discount = model.data[discount_col].to_numpy(dtype=np.float64)
+    _paid, regular, _index = decompose_log_price(price, discount)
+    return regular
+
+
 def exogenous_design(model: DemandModel) -> np.ndarray:
     """SKU intercepts, controls, trend, seasonality, and period effects.
 

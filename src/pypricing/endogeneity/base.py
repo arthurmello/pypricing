@@ -81,6 +81,7 @@ class EndogeneityMethod(Protocol):
         t0: Any,
         seasonality_components: tuple[str, ...] | None,
         time_effects: Any = None,
+        model: DemandModel | None = None,
     ) -> Any: ...
 
     def summarize_posterior(

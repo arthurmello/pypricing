@@ -24,7 +24,12 @@ from pypricing.model_components.cross_elasticity import (
     validate_cross_elasticity_config,
 )
 from pypricing.data import CrossPairIndex, PanelColumns, PricePanelData
-from pypricing.endogeneity import EndogeneityMethod, IVMethod
+from pypricing.diagnostics import DiagnosticWarning
+from pypricing.endogeneity import (
+    EndogeneityMethod,
+    get_endogeneity_method,
+    parse_endogeneity,
+)
 from pypricing.data.price_panel import (
     decompose_log_price,
     floor_censored_fraction,
@@ -142,9 +147,8 @@ class DemandModel:
         Column names and panel knobs (SKU / price / quantity, controls,
         instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
         ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
-        IV on the log-demand model classes. After ``build_model``, that correction
-        is ``endogeneity_method_`` (an ``IVMethod``); it is ``None`` without
-        instruments. ``discount_col``, when set, splits
+        IV when ``endogeneity`` is left unset. After ``build_model``, the active
+        correction is ``endogeneity_method_``. ``discount_col``, when set, splits
         own-price response into a regular-price elasticity (``elasticity_sku``,
         the curve at regular price) and a log-linear promo elasticity
         (``promo_elasticity_sku``). ``predict`` then requires that column;
@@ -175,6 +179,16 @@ class DemandModel:
         ``gamma_mundlak`` times that SKU's centered mean log regular price.
         Removes the shrinkage bias that appears when baseline demand is
         correlated with a SKU's price level. Default ``False``.
+    endogeneity
+        Correction for a price set from the demand shock. ``None`` (default)
+        uses control-function IV when instrument columns are present, and no
+        correction otherwise. ``"copula"`` adds a Gaussian-copula control from
+        the price residual; it is identified only when that residual is not
+        normal. ``"iv"`` requires instruments. On
+        ``QuadraticLogDemandModel`` and ``SigmoidSaturationDemandModel``,
+        setting this warns: a control function in a nonlinear curve needs a
+        stronger assumption than in a linear one. ``predict`` and
+        ``optimize_prices`` use the structural curve, with the control at 0.
     model_config
         Prior overrides keyed by parameter name, each
         ``{"dist": <PyMC dist>, "kwargs": {...}}``.
@@ -201,6 +215,7 @@ class DemandModel:
         seasonality: str | Sequence[str] | None = None,
         time_effects: TimeEffectsKind | None = None,
         mundlak: bool = False,
+        endogeneity: str | None = None,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -213,6 +228,7 @@ class DemandModel:
         self.seasonality = normalize_seasonality(seasonality)
         self.time_effects = time_effects
         self.mundlak = bool(mundlak)
+        self.endogeneity = parse_endogeneity(endogeneity)
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.iv_names_: tuple[str, ...] = ()
@@ -229,6 +245,8 @@ class DemandModel:
         self.no_regular_price_variation_skus_: list[Any] = []
         self.fit_kwargs_: dict[str, Any] = {}
         self._validate_configuration()
+        if self.endogeneity is not None:
+            self._warn_nonlinear_endogeneity(stacklevel=2)
 
     def clone(self, **panel_overrides: Any) -> Self:
         """Unfitted copy with the same configuration.
@@ -246,6 +264,7 @@ class DemandModel:
             seasonality=self.seasonality,
             time_effects=self.time_effects,
             mundlak=self.mundlak,
+            endogeneity=self.endogeneity,
             model_config=self.model_config,
             sampler_config=self.sampler_config,
         )
@@ -400,6 +419,7 @@ class DemandModel:
             "seasonality": json.dumps(_seasonality_to_json(self.seasonality)),
             "time_effects": json.dumps(self.time_effects),
             "mundlak": json.dumps(self.mundlak),
+            "endogeneity": json.dumps(self.endogeneity),
         }
 
     def set_idata_attrs(
@@ -471,6 +491,9 @@ class DemandModel:
             json.loads(attrs["time_effects"]) if "time_effects" in attrs else None
         )
         mundlak = json.loads(attrs["mundlak"]) if "mundlak" in attrs else False
+        endogeneity = (
+            json.loads(attrs["endogeneity"]) if "endogeneity" in attrs else None
+        )
         return {
             "model_config": cls._model_config_formatting(
                 json.loads(attrs["model_config"])
@@ -482,6 +505,7 @@ class DemandModel:
             "seasonality": seasonality,
             "time_effects": time_effects,
             "mundlak": mundlak,
+            "endogeneity": endogeneity,
         }
 
     @classmethod
@@ -550,9 +574,68 @@ class DemandModel:
             t0=self.t0_,
             seasonality_components=self.seasonality_,
             time_effects=self.time_effects,
+            model=self,
         )
 
-    def build_model(self, data: pd.DataFrame) -> None:
+    def _warn_nonlinear_endogeneity(self, *, stacklevel: int) -> None:
+        """Control functions in a nonlinear curve need a stronger assumption."""
+        if self.model_name not in {"quadratic", "sigmoid"}:
+            return
+        warnings.warn(
+            "A control function in a nonlinear demand curve needs a stronger "
+            "assumption than in a linear one: the demand shock has to enter in "
+            "a way that stays valid along the whole curve. "
+            f"{type(self).__name__} with endogeneity set relies on that.",
+            DiagnosticWarning,
+            stacklevel=stacklevel,
+        )
+
+    def _resolve_endogeneity(
+        self, name: str | None, n_iv: int
+    ) -> EndogeneityMethod | None:
+        if name is None:
+            return get_endogeneity_method("iv") if n_iv else None
+        if name == "iv" and n_iv == 0:
+            raise ValueError(
+                "endogeneity='iv' requires instruments. Set "
+                "PanelColumns.iv_columns or add iv_* columns."
+            )
+        return get_endogeneity_method(name)
+
+    def endogeneity_check(
+        self,
+        data: pd.DataFrame,
+        *,
+        method: str = "copula",
+    ) -> dict[str, Any]:
+        """Fast copula or IV check: assumptions and a point estimate, no MCMC.
+
+        Builds the model with ``method``. When the verdict is ``not identified``
+        the result has no ``estimate``. A ``weak`` verdict still includes one.
+        """
+        if self.endogeneity is None:
+            chosen = parse_endogeneity(method)
+            if chosen is not None:
+                self._warn_nonlinear_endogeneity(stacklevel=2)
+        self.build_model(data, endogeneity=method)
+        impl = self.endogeneity_method_
+        if impl is None:
+            raise ValueError(
+                "No endogeneity method to check. Pass method='copula' or 'iv'."
+            )
+        report = impl.check_assumptions(self)
+        result: dict[str, Any] = {
+            "method": impl.name,
+            "verdict": report.verdict(),
+            "assumptions": report,
+        }
+        if report.verdict() != "not identified":
+            result["estimate"] = impl.quick_estimate(self, report)
+        return result
+
+    def build_model(
+        self, data: pd.DataFrame, *, endogeneity: str | None = None
+    ) -> None:
         self._validate_configuration()
         self._validate_time_effect_cells(data)
         cols = self.panel_columns
@@ -624,12 +707,15 @@ class DemandModel:
         self.period_levels_ = panel.period_levels
         self.region_levels_ = panel.region_levels
 
-        self.endogeneity_method_ = IVMethod() if panel.n_iv else None
-        self.model = self._build_pymc_model(panel)
+        chosen = (
+            self.endogeneity if endogeneity is None else parse_endogeneity(endogeneity)
+        )
         self.sku_levels_ = panel.sku_levels
         self.control_names_ = panel.control_names
         self.iv_names_ = panel.iv_names
         self.data = data.copy()
+        self.endogeneity_method_ = self._resolve_endogeneity(chosen, panel.n_iv)
+        self.model = self._build_pymc_model(panel)
 
     def _warn_unidentified_prices(self, panel: PricePanelData) -> None:
         regular = skus_without_variation(
@@ -677,6 +763,11 @@ class DemandModel:
 
     def fit(self, data: pd.DataFrame, **sample_kwargs: Any) -> az.InferenceData:
         self.build_model(data)
+        if (
+            self.endogeneity_method_ is not None
+            and self.endogeneity_method_.name == "copula"
+        ):
+            self.endogeneity_method_.check_assumptions(self)
         self.fit_kwargs_ = dict(sample_kwargs)
         sampler_kwargs = dict(self.sampler_config)
         sampler_kwargs.update(sample_kwargs)
@@ -713,6 +804,7 @@ class DemandModel:
                 "trend_sku",
                 "beta_season",
                 "rho",
+                "rho_copula",
                 "pi",
                 "sigma_price",
                 "alpha_price_sku",
