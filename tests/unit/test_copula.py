@@ -159,4 +159,4 @@ def test_clone_keeps_the_endogeneity_setting():
 
 def test_endogeneity_name_is_rejected_when_unknown():
     with pytest.raises(ValueError, match="endogeneity"):
-        LogLogDemandModel(endogeneity="latent")
+        LogLogDemandModel(endogeneity="not-a-method")

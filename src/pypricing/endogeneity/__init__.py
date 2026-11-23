@@ -9,9 +9,10 @@ from pypricing.endogeneity.base import (
 from pypricing.endogeneity.copula import CopulaMethod
 from pypricing.endogeneity.design import exogenous_design
 from pypricing.endogeneity.iv import IVMethod
+from pypricing.endogeneity.latent import LatentMethod
 from pypricing.endogeneity.lewbel import LewbelMethod
 
-ENDOGENEITY_METHODS = ("copula", "iv", "lewbel")
+ENDOGENEITY_METHODS = ("copula", "iv", "latent", "lewbel")
 
 __all__ = [
     "Assumption",
@@ -19,6 +20,7 @@ __all__ = [
     "CopulaMethod",
     "EndogeneityMethod",
     "IVMethod",
+    "LatentMethod",
     "LewbelMethod",
     "QuickEstimate",
     "exogenous_design",
@@ -28,7 +30,7 @@ __all__ = [
 
 
 def parse_endogeneity(value: str | None) -> str | None:
-    """``None``, ``"copula"``, ``"iv"``, or ``"lewbel"``."""
+    """``None``, ``"copula"``, ``"iv"``, ``"latent"``, or ``"lewbel"``."""
     if value is None:
         return None
     if not isinstance(value, str):
@@ -43,12 +45,14 @@ def parse_endogeneity(value: str | None) -> str | None:
 
 
 def get_endogeneity_method(name: str) -> EndogeneityMethod:
-    """Fresh method instance for ``"copula"``, ``"iv"``, or ``"lewbel"``."""
+    """Fresh method instance for ``"copula"``, ``"iv"``, ``"latent"``, or ``"lewbel"``."""
     key = parse_endogeneity(name)
     if key == "copula":
         return CopulaMethod()
     if key == "iv":
         return IVMethod()
+    if key == "latent":
+        return LatentMethod()
     if key == "lewbel":
         return LewbelMethod()
     raise ValueError("endogeneity method name is required")

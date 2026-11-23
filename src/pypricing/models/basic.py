@@ -30,6 +30,7 @@ from pypricing.endogeneity import (
     get_endogeneity_method,
     parse_endogeneity,
 )
+from pypricing.endogeneity.latent import EXPERIMENTAL_WARNING
 from pypricing.data.price_panel import (
     decompose_log_price,
     floor_censored_fraction,
@@ -187,7 +188,10 @@ class DemandModel:
         normal. ``"lewbel"`` builds instruments from a heteroskedastic price
         residual and estimates them with the IV control function. It is not
         identified when that residual is homoskedastic, or when every exogenous
-        regressor is constant. ``"iv"`` requires instruments. On
+        regressor is constant. ``"latent"`` is experimental: it treats the
+        unobserved driver of price as a discrete mixture and is not identified
+        when a single normal fits that residual as well. ``"iv"`` requires
+        instruments. On
         ``QuadraticLogDemandModel`` and ``SigmoidSaturationDemandModel``,
         setting this warns: a control function in a nonlinear curve needs a
         stronger assumption than in a linear one. ``predict`` and
@@ -250,6 +254,8 @@ class DemandModel:
         self._validate_configuration()
         if self.endogeneity is not None:
             self._warn_nonlinear_endogeneity(stacklevel=2)
+        if self.endogeneity == "latent":
+            self._warn_experimental_latent(stacklevel=2)
 
     def clone(self, **panel_overrides: Any) -> Self:
         """Unfitted copy with the same configuration.
@@ -593,6 +599,10 @@ class DemandModel:
             stacklevel=stacklevel,
         )
 
+    def _warn_experimental_latent(self, *, stacklevel: int) -> None:
+        """Latent IV is experimental, whichever curve it is attached to."""
+        warnings.warn(EXPERIMENTAL_WARNING, DiagnosticWarning, stacklevel=stacklevel)
+
     def _resolve_endogeneity(
         self, name: str | None, n_iv: int
     ) -> EndogeneityMethod | None:
@@ -611,7 +621,7 @@ class DemandModel:
         *,
         method: str = "copula",
     ) -> dict[str, Any]:
-        """Fast copula, Lewbel, or IV check: assumptions and a point estimate, no MCMC.
+        """Fast copula, Lewbel, latent IV, or IV check: assumptions and a point estimate, no MCMC.
 
         Builds the model with ``method``. When the verdict is ``not identified``
         the result has no ``estimate``. A ``weak`` verdict still includes one.
@@ -620,11 +630,14 @@ class DemandModel:
             chosen = parse_endogeneity(method)
             if chosen is not None:
                 self._warn_nonlinear_endogeneity(stacklevel=2)
+            if chosen == "latent":
+                self._warn_experimental_latent(stacklevel=2)
         self.build_model(data, endogeneity=method)
         impl = self.endogeneity_method_
         if impl is None:
             raise ValueError(
-                "No endogeneity method to check. Pass method='copula', 'lewbel', or 'iv'."
+                "No endogeneity method to check. Pass method='copula', 'lewbel', "
+                "'latent', or 'iv'."
             )
         report = impl.check_assumptions(self)
         result: dict[str, Any] = {
@@ -808,6 +821,7 @@ class DemandModel:
                 "beta_season",
                 "rho",
                 "rho_copula",
+                "rho_latent",
                 "pi",
                 "sigma_price",
                 "alpha_price_sku",
