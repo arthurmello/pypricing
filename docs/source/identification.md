@@ -191,4 +191,6 @@ The fast check says whether a method is identified. It does not say whether
 price was endogenous. After you fit the method you chose, read the correction
 parameter: `rho` for IV and Lewbel, `rho_copula` for the copula, `rho_latent`
 for latent IV. An interval that includes 0 is no evidence of endogeneity. Use
-the uncorrected model. The correction adds noise.
+the uncorrected model. The correction adds noise. What to write down, including
+the sources of endogeneity and the checks for the method you kept, is in
+[Reporting endogeneity](diagnostics.md#reporting-endogeneity).

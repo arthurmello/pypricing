@@ -169,6 +169,8 @@ out = model.check_instruments(compare_ols=False)  # instant, no IV vs OLS compar
 
 None of these checks whether the instruments are valid in the first place
 (that they affect demand only through price). That remains an assumption.
+What to write down, including when the correction is not IV, is in
+[Reporting endogeneity](#reporting-endogeneity).
 
 ## Sensitivity
 
@@ -201,3 +203,106 @@ fitted separately per SKU. The model instead shares information across SKUs,
 so for SKUs with little price variation the two can disagree, and those SKUs
 get low robustness values. With instruments, use the
 [instrument checks](#instruments) instead.
+
+## Reporting endogeneity
+
+A clean sample is not a report. Write three things. The first two are about
+the category and the design. The third is the correction, and the library
+supplies its numbers.
+
+### Sources, and the controls that address them
+
+Name the ways price in this category is set from demand, and the term that
+absorbs each one. Typical sources, and what in the model can take them:
+
+- A promotion timed to a soft week. If the discount is not set from the demand
+  shock, it stays in `promo_elasticity_sku` and out of the instrumented price.
+  If it is set from the shock, it is part of the endogenous price.
+- A list price set from a forecast of demand. That is the shock the correction
+  is for. A control absorbs it only when the control is the forecast, or
+  something that moves with it.
+- A shock shared by every SKU in a period. `time_effects="period"` (or
+  `"region_period"`) absorbs it. It does not absorb a shock that hits one SKU
+  and that SKU's price.
+- A SKU whose baseline demand sits at a different price level from the others.
+  `mundlak=True` puts that SKU's mean log price into the intercept, so the
+  elasticity is not standing in for the baseline.
+- Anything you measured that moves both price and demand (distribution, cost,
+  season, a campaign). Those are `control_*` columns, or
+  `PanelColumns.control_columns`.
+
+Say which of these you included, and which source each one is there for.
+
+### What remains unaddressed
+
+Say what those controls do not absorb. A control only helps if it actually
+moves with the shared shock. What is usually left:
+
+- A SKU-and-period shock that price still reacts to. Period effects do not
+  remove it. That is what an instrument, or one of the other corrections, is
+  for.
+- The exclusion restriction: an instrument, a Lewbel regressor, or a latent
+  class has to move price without moving demand on its own. The library cannot
+  test that.
+- On a quadratic or sigmoid curve, the control function assumes the demand
+  shock stays valid along the whole curve, not only as a shift next to a
+  linear price. Fitting one of those curves with `endogeneity` set warns about
+  this.
+
+Two checks speak to the leftover, and neither shows it is gone.
+`check_falsification` asks whether next period's price predicts today's
+demand. `check_sensitivity` asks how strong an unmeasured confounder would
+have to be, compared with your strongest control (`rv_qa`). Report them as
+bounds, not as a pass.
+
+### The correction, and its checks
+
+Name the method you fit and why. `compare_endogeneity` is the fast check: a
+row that says `not identified` is a method you did not use, and the note says
+why. Then report the numbers for the method you kept. If the correction's
+interval includes 0, say there is no evidence of endogeneity and that the
+uncorrected model is the one you use.
+
+**IV.** After `fit`, `check_instruments` returns the three tests:
+
+- Instrument strength: `first_stage["f"]`, and `r2_without` against `r2_with`.
+  F below 10 is weak. Say so, and do not prefer the corrected elasticities
+  over the uncorrected ones on the strength of a weak instrument.
+- Overidentification: `overid["p_value"]` when `overid["applicable"]` is true,
+  which requires two or more instruments. A p-value below 0.05 means the
+  instruments disagree. With one instrument, say the test does not apply.
+- The endogeneity test: `rho["hdi"]`. An interval that excludes 0 is evidence
+  that price responds to the demand shock. An interval that includes 0 is no
+  evidence of endogeneity.
+
+**Lewbel.** From `endogeneity_check(df, method="lewbel")`, report the
+`heteroskedasticity` assumption (the Breusch-Pagan p-value) and the
+`relevance` assumption (the first-stage F of the generated instruments). After
+the fit, `summarize_posterior` gives `rho`, and that is the endogeneity test.
+Do not report a Sargan p-value. `check_instruments` only sees `iv_*` columns,
+not the generated instruments.
+
+**Copula.** From `endogeneity_check(df, method="copula")`, report the
+`non_normal_price` assumption. Its detail is the normality p-value of the
+price residual. The correction is not identified when that residual is
+consistent with a normal distribution. On a quadratic or sigmoid curve, also
+report the `nonlinear_terms` assumption: a correlation above 0.8 means the
+control is hard to tell apart from the bend of the curve. After the fit,
+`summarize_posterior` gives `rho_copula` and, on those curves, the posterior
+correlation with `curvature_sku` or `log_price_center_sku`.
+
+**Latent IV.** Say that the method is experimental. From
+`endogeneity_check(df, method="latent")`, report the `mixture` assumption:
+the ELPD difference against a single normal, and its standard error. A normal
+that fits as well means the correction is not identified. If the verdict is
+`weak`, report the `stability` assumption: the elasticity moved across class
+counts that fit about as well. After the fit, `summarize_posterior` gives
+`rho_latent` and `n_classes`.
+
+```python
+checked = model.endogeneity_check(df, method="copula")
+for item in checked["assumptions"].assumptions:
+    print(item.name, item.status, item.detail)
+
+summary = model.endogeneity_method_.summarize_posterior(model)
+```
