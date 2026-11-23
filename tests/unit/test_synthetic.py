@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.special import softplus
+from scipy.stats import skew
 
 from pypricing import generate_mock_data
 
@@ -410,6 +411,110 @@ def test_common_shock_by_region_draws_a_separate_path():
     assert truth.lambda_period is not None
     assert truth.lambda_period.shape == (2, 5)
     assert not np.allclose(truth.lambda_period[0], truth.lambda_period[1])
+
+
+def test_default_price_distribution_matches_explicit_normal():
+    kwargs = dict(
+        n_periods=15,
+        n_skus=2,
+        n_instruments=1,
+        n_controls=1,
+        endogeneity=0.5,
+        random_state=1,
+    )
+    plain = generate_mock_data(**kwargs)
+    explicit = generate_mock_data(
+        **kwargs,
+        price_distribution="normal",
+        heteroskedasticity=False,
+        n_price_points=3,
+    )
+    pd.testing.assert_frame_equal(plain, explicit)
+    assert "hetero" not in plain.columns
+
+
+def test_gamma_prices_are_skewed_and_differ_from_normal():
+    kwargs = dict(
+        n_periods=2000,
+        n_skus=1,
+        endogeneity=0.0,
+        include_seasonality=False,
+        random_state=0,
+    )
+    gamma = generate_mock_data(**kwargs, price_distribution="gamma")
+    normal = generate_mock_data(**kwargs, price_distribution="normal")
+    assert not np.allclose(gamma["price"], normal["price"])
+    assert skew(gamma["price"].to_numpy()) > 1.0
+    assert abs(skew(normal["log_price"].to_numpy())) < 0.5
+
+
+def test_discrete_prices_lie_on_the_grid_and_move_with_the_demand_shock():
+    grid = np.exp(np.linspace(np.log(2.0), np.log(15.0), 4))
+    kwargs = dict(
+        n_periods=40,
+        n_skus=6,
+        price_distribution="discrete",
+        n_price_points=4,
+        noise_sigma=0.8,
+        price_shock_sigma=0.05,
+        include_seasonality=False,
+        random_state=0,
+    )
+    exogenous = generate_mock_data(**kwargs, endogeneity=0.0)
+    endogenous = generate_mock_data(**kwargs, endogeneity=2.5)
+    for frame in (exogenous, endogenous):
+        distance = np.min(
+            np.abs(frame["price"].to_numpy()[:, None] - grid[None, :]), axis=1
+        )
+        assert np.all(distance < 1e-8)
+        assert frame["price"].nunique() <= 4
+    assert exogenous["price"].nunique() >= 2
+    assert not np.allclose(exogenous["price"], endogenous["price"])
+
+
+def test_heteroskedasticity_widens_price_shocks_and_writes_the_driver():
+    kwargs = dict(
+        n_periods=800,
+        n_skus=1,
+        price_shock_sigma=0.01,
+        endogeneity=0.0,
+        include_seasonality=False,
+        random_state=0,
+    )
+    off = generate_mock_data(**kwargs, heteroskedasticity=False)
+    on, truth = generate_mock_data(
+        **kwargs, heteroskedasticity=True, return_truth=True
+    )
+    assert "hetero" not in off.columns
+    assert "hetero" in on.columns
+    assert truth.heteroskedasticity is True
+    assert not np.allclose(off["price"], on["price"])
+    high = on.loc[on["hetero"] > 0, "log_price"]
+    low = on.loc[on["hetero"] <= 0, "log_price"]
+    assert high.var() > 2.0 * low.var()
+
+
+def test_price_distribution_is_recorded_and_validated():
+    _df, truth = generate_mock_data(
+        n_periods=4,
+        n_skus=1,
+        price_distribution="gamma",
+        random_state=0,
+        return_truth=True,
+    )
+    assert truth.price_distribution == "gamma"
+    assert truth.n_price_points == 3
+    with pytest.raises(ValueError, match="price_distribution"):
+        generate_mock_data(n_periods=4, n_skus=1, price_distribution="uniform")
+    with pytest.raises(ValueError, match="n_price_points"):
+        generate_mock_data(
+            n_periods=4,
+            n_skus=1,
+            price_distribution="discrete",
+            n_price_points=1,
+        )
+    with pytest.raises(TypeError, match="heteroskedasticity"):
+        generate_mock_data(n_periods=4, n_skus=1, heteroskedasticity=1)
 
 
 def test_common_shock_validation():

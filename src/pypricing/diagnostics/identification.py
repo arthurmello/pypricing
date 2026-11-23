@@ -144,38 +144,13 @@ def sargan_test(
 
 
 def first_stage_exogenous(model: DemandModel) -> np.ndarray:
-    """Exogenous regressors of the training frame: SKU, controls, trend, season."""
-    assert model.data is not None and model.sku_levels_ is not None
-    data = model.data
-    sku = pd.Categorical(data[model.sku_col], categories=model.sku_levels_)
-    dummies = pd.get_dummies(sku).to_numpy(dtype=np.float64)
-    parts: list[np.ndarray] = [dummies]
-    if model.control_names_:
-        parts.append(
-            data.loc[:, list(model.control_names_)].to_numpy(dtype=np.float64)
-        )
-    if model.trend is not None:
-        t = model._t_years_for_frame(data).reshape(-1, 1)
-        parts.append(dummies * t if model.trend == "sku" else t)
-    season = model._season_features_for_frame(data)
-    if season is not None and season.size:
-        parts.append(season)
-    if model.time_effects is not None and model.period_col in data.columns:
-        if (
-            model.time_effects == "region_period"
-            and model.region_col is not None
-            and model.region_col in data.columns
-        ):
-            cell = (
-                data[model.region_col].astype(str)
-                + "|"
-                + data[model.period_col].astype(str)
-            )
-            parts.append(pd.get_dummies(cell).to_numpy(dtype=np.float64))
-        else:
-            period = pd.Categorical(data[model.period_col])
-            parts.append(pd.get_dummies(period).to_numpy(dtype=np.float64))
-    return np.column_stack(parts)
+    """Exogenous regressors of the training frame: SKU, controls, trend, season.
+
+    The columns are :func:`pypricing.endogeneity.design.exogenous_design`.
+    """
+    from pypricing.endogeneity.design import exogenous_design
+
+    return exogenous_design(model)
 
 
 def _instruments_and_log_price(model: DemandModel) -> tuple[np.ndarray, np.ndarray]:

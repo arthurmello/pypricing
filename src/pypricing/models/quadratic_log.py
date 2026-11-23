@@ -20,7 +20,6 @@ from pypricing.model_components.time_terms import (
     get_season_term,
     get_trend_term,
 )
-from pypricing.model_components.iv_terms import get_control_function_term
 
 
 class QuadraticLogDemandModel(DemandModel):
@@ -92,14 +91,7 @@ class QuadraticLogDemandModel(DemandModel):
             period_term = get_period_effect_term(
                 self.model_config, data, self.time_effects
             )
-            control_function_term = get_control_function_term(
-                self.model_config,
-                data,
-                trend=self.trend,
-                t0=self.t0_,
-                seasonality_components=self.seasonality_,
-                time_effects=self.time_effects,
-            )
+            control_function_term = self._endogeneity_term(data)
 
             beta1_sku = elasticity_sku - 2.0 * curvature_sku * log_p_mid_sku
 

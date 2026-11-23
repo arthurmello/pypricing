@@ -24,6 +24,13 @@ _QUADRATIC_CURVATURE_STD = 0.55
 _QUADRATIC_CURVATURE_MIN_ABS = 0.12
 _PANEL_NOISE_SIGMA = 0.12
 _PANEL_SEASON_BETA = 0.15
+# Gamma(2, scale=4) has mean 8 and positive skew. Discrete levels span the
+# same price range as the normal random-walk's starting price.
+_GAMMA_PRICE_SHAPE = 2.0
+_GAMMA_PRICE_SCALE = 4.0
+_DISCRETE_PRICE_MIN = 2.0
+_DISCRETE_PRICE_MAX = 15.0
+_PRICE_DISTRIBUTIONS = frozenset({"normal", "gamma", "discrete"})
 
 
 @dataclass(frozen=True)
@@ -47,6 +54,9 @@ class MockDataTruth:
     n_instruments: int = 0
     instrument_coef: float = 0.0
     endogeneity: float = 0.0
+    price_distribution: str = "normal"
+    n_price_points: int = 3
+    heteroskedasticity: bool = False
     promo_elasticity: float | None = None
     lambda_period: np.ndarray | None = None
     common_shock_sigma: float = 0.0
@@ -94,6 +104,9 @@ class _PanelSim:
     promo_frequency: float = 0.3
     promo_depth: float = 0.2
     promo_elasticity: float = -3.5
+    price_distribution: str = "normal"
+    n_price_points: int = 3
+    heteroskedasticity: bool = False
 
     def lambda_at(self, region: int) -> np.ndarray:
         """Period shock for one region. 1-d when the shock is national."""
@@ -109,6 +122,36 @@ def _as_rng(random_state: RandomState) -> np.random.Generator:
 
 
 _VALID_DEMAND_SHAPES = frozenset({"log_log", "quadratic", "sigmoid"})
+
+
+def _parse_price_distribution(price_distribution: str) -> str:
+    key = price_distribution.strip().lower()
+    if key not in _PRICE_DISTRIBUTIONS:
+        allowed = ", ".join(sorted(_PRICE_DISTRIBUTIONS))
+        raise ValueError(
+            f"price_distribution {price_distribution!r} is not supported; "
+            f"use one of: {allowed}"
+        )
+    return key
+
+
+def _discrete_price_grid(n_points: int) -> np.ndarray:
+    """``n_points`` price levels, equally spaced in log price from 2 to 15."""
+    if n_points < 2:
+        raise ValueError("n_price_points must be at least 2")
+    return np.exp(
+        np.linspace(
+            np.log(_DISCRETE_PRICE_MIN),
+            np.log(_DISCRETE_PRICE_MAX),
+            n_points,
+        )
+    )
+
+
+def _snap_log_price(log_price: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    log_grid = np.log(grid)
+    nearest = np.abs(log_price[..., None] - log_grid).argmin(axis=-1)
+    return np.log(grid[nearest])
 
 
 def _parse_demand_shape(shape: str) -> str:
@@ -355,13 +398,26 @@ def _simulate_log_price_panel(
     n_reg: int,
     n_periods: int,
     price_shock_sigma: float = 0.03,
+    price_distribution: str = "normal",
 ) -> np.ndarray:
+    """Exogenous log price, before instruments and the demand shock.
+
+    ``normal`` and ``discrete`` share the random-walk draws. ``discrete`` snaps
+    to a grid later, after endogeneity is added. ``gamma`` draws iid prices and
+    does not use ``price_shock_sigma``.
+    """
     log_price_panel = np.zeros((n_skus, n_reg, n_periods), dtype=np.float64)
     for s in range(n_skus):
         for r in range(n_reg):
-            base_price = rng.uniform(2.0, 15.0)
-            price_shocks = rng.normal(0, price_shock_sigma, size=n_periods).cumsum()
-            log_price_panel[s, r, :] = np.log(base_price) + price_shocks
+            if price_distribution == "gamma":
+                price = rng.gamma(
+                    _GAMMA_PRICE_SHAPE, _GAMMA_PRICE_SCALE, size=n_periods
+                )
+                log_price_panel[s, r, :] = np.log(price)
+            else:
+                base_price = rng.uniform(_DISCRETE_PRICE_MIN, _DISCRETE_PRICE_MAX)
+                price_shocks = rng.normal(0, price_shock_sigma, size=n_periods).cumsum()
+                log_price_panel[s, r, :] = np.log(base_price) + price_shocks
     return log_price_panel
 
 
@@ -395,11 +451,21 @@ def _mean_log_quantity(
 def _draw_observed_log_prices(
     rng: np.random.Generator,
     sim: _PanelSim,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+]:
     """Observed prices after instruments and endogeneity, plus the shocks behind them.
 
     Drawn in the same SKU–region order as the quantity loop so a fixed seed keeps
-    the same shocks. Cross-price terms use these log prices.
+    the same shocks. Cross-price terms use these log prices. With
+    ``heteroskedasticity`` off and a normal or discrete distribution, the random
+    draws match the historical generator; discrete prices are snapped afterwards,
+    and the heteroskedastic shock is an extra draw only when that flag is on.
     """
     n_skus = sim.n_skus
     n_reg = sim.n_reg
@@ -414,6 +480,11 @@ def _draw_observed_log_prices(
     instruments_panel = (
         np.empty((n_skus, n_reg, n_periods, sim.n_instruments), dtype=np.float64)
         if sim.n_instruments
+        else None
+    )
+    hetero_panel = (
+        np.empty((n_skus, n_reg, n_periods), dtype=np.float64)
+        if sim.heteroskedasticity
         else None
     )
 
@@ -432,14 +503,26 @@ def _draw_observed_log_prices(
             if sim.n_controls:
                 assert controls_panel is not None
                 controls_panel[s, r] = rng.normal(size=(n_periods, sim.n_controls))
+            if sim.heteroskedasticity:
+                driver = rng.normal(size=n_periods)
+                log_price = log_price + rng.normal(size=n_periods) * np.exp(
+                    0.5 * driver
+                )
+                assert hetero_panel is not None
+                hetero_panel[s, r] = driver
             log_price_obs[s, r] = log_price
             demand_shocks[s, r] = demand_shock
+    if sim.price_distribution == "discrete":
+        log_price_obs = _snap_log_price(
+            log_price_obs, _discrete_price_grid(sim.n_price_points)
+        )
     return (
         log_price_obs,
         np.exp(log_price_obs),
         demand_shocks,
         controls_panel,
         instruments_panel,
+        hetero_panel,
     )
 
 
@@ -450,9 +533,14 @@ def _simulate_panel_rows(
     rows: list[dict] = []
     beta_season = _PANEL_SEASON_BETA
     hierarchy = sim.effects.hierarchy
-    log_price_obs, price_obs, demand_shocks, controls_panel, instruments_panel = (
-        _draw_observed_log_prices(rng, sim)
-    )
+    (
+        log_price_obs,
+        price_obs,
+        demand_shocks,
+        controls_panel,
+        instruments_panel,
+        hetero_panel,
+    ) = _draw_observed_log_prices(rng, sim)
     # Regular price is the random walk (plus instruments and endogeneity).
     # Promotions scale the paid price off that regular price.
     if sim.promotions:
@@ -473,6 +561,7 @@ def _simulate_panel_rows(
             price = price_obs[s, r]
             demand_shock = demand_shocks[s, r]
             instruments = None if instruments_panel is None else instruments_panel[s, r]
+            hetero = None if hetero_panel is None else hetero_panel[s, r]
 
             season = (
                 sim.period_season
@@ -574,6 +663,8 @@ def _simulate_panel_rows(
                 if instruments is not None:
                     for k in range(sim.n_instruments):
                         row[f"iv_{k + 1}"] = float(instruments[t, k])
+                if hetero is not None:
+                    row["hetero"] = float(hetero[t])
                 rows.append(row)
 
     return rows
@@ -600,6 +691,9 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    price_distribution: str = "normal",
+    n_price_points: int = 3,
+    heteroskedasticity: bool = False,
     common_shock_sigma: float = 0.0,
     common_endogeneity: float = 0.0,
     common_shock_by_region: bool = False,
@@ -635,6 +729,9 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    price_distribution: str = "normal",
+    n_price_points: int = 3,
+    heteroskedasticity: bool = False,
     common_shock_sigma: float = 0.0,
     common_endogeneity: float = 0.0,
     common_shock_by_region: bool = False,
@@ -669,6 +766,9 @@ def generate_mock_data(
     n_instruments: int = 0,
     instrument_coef: float = 0.5,
     endogeneity: float = 0.0,
+    price_distribution: str = "normal",
+    n_price_points: int = 3,
+    heteroskedasticity: bool = False,
     common_shock_sigma: float = 0.0,
     common_endogeneity: float = 0.0,
     common_shock_by_region: bool = False,
@@ -701,10 +801,18 @@ def generate_mock_data(
     Common additions: controls, seasonality, Gaussian noise. Regions are separate
     price paths and cross-price cells, with no region intercept.
 
-    Prices use a random walk on log scale (one series per SKU–region path).
-    Optional ``iv_*`` columns shift log-price; ``endogeneity`` leaks the demand
-    shock into log-price so OLS elasticity is biased. Own-price and cross-price
-    terms both use those observed log prices.
+    Prices are partly set from the demand shock when ``endogeneity`` is not 0.
+    ``price_distribution="normal"`` (the default) is a random walk on log price,
+    one series per SKU–region path. ``"gamma"`` draws iid Gamma(2, scale=4)
+    prices. ``"discrete"`` uses that same random walk, then snaps the price —
+    after instruments and the demand shock — to ``n_price_points`` levels
+    equally spaced in log price between 2 and 15. Optional ``iv_*`` columns
+    shift log-price. ``heteroskedasticity=True`` adds a further log-price shock
+    with standard deviation ``exp(0.5 * hetero)`` and writes the standard-normal
+    driver as ``hetero``; that column does not enter the demand mean, and the
+    flag off does not touch the random stream. Own-price and cross-price terms
+    use the observed log prices. Positive ``endogeneity`` biases associational
+    elasticity toward zero.
 
     Parameters
     ----------
@@ -764,6 +872,16 @@ def generate_mock_data(
     endogeneity
         Loading of the demand shock onto log-price (default ``0.0`` = exogenous
         prices). Positive values bias associational elasticity toward zero.
+    price_distribution
+        Exogenous price draw: ``\"normal\"`` (default, log-price random walk),
+        ``\"gamma\"`` (iid gamma prices), or ``\"discrete\"`` (the normal latent
+        price snapped to a grid after the demand shock is added).
+    n_price_points
+        Number of levels when ``price_distribution="discrete"`` (default 3).
+        Must be at least 2. Ignored otherwise.
+    heteroskedasticity
+        If ``True``, add a heteroskedastic log-price shock and a ``hetero``
+        column (default ``False``). ``False`` leaves draws unchanged.
     common_shock_sigma
         Std of a period shock λ shared by every SKU (default ``0.0``, off).
         With ``common_shock_by_region``, one shock is drawn per region and period.
@@ -809,7 +927,8 @@ def generate_mock_data(
         Columns: ``sku``, ``period``, ``price``, ``quantity``, ``log_price``,
         ``log_quantity``, optional ``discount_rate`` (when ``promotions`` is
         set), ``category`` or ``category_1`` …, ``region``, ``control_*``,
-        ``iv_*``. With ``return_truth=True``, ``(frame, truth)``.
+        ``iv_*``, and ``hetero`` when ``heteroskedasticity`` is set. With
+        ``return_truth=True``, ``(frame, truth)``.
     """
     ce = _validate_kwargs(
         n_periods,
@@ -824,6 +943,11 @@ def generate_mock_data(
     )
 
     demand_shape = _parse_demand_shape(shape)
+    price_distribution = _parse_price_distribution(price_distribution)
+    if price_distribution == "discrete":
+        _discrete_price_grid(n_price_points)
+    if not isinstance(heteroskedasticity, bool):
+        raise TypeError("heteroskedasticity must be True or False")
 
     if price_shock_sigma <= 0:
         raise ValueError("price_shock_sigma must be positive")
@@ -887,6 +1011,7 @@ def generate_mock_data(
         n_reg=n_reg,
         n_periods=n_periods,
         price_shock_sigma=price_shock_sigma,
+        price_distribution=price_distribution,
     )
 
     if common_shock_sigma == 0.0:
@@ -936,6 +1061,9 @@ def generate_mock_data(
             instrument_coef=float(instrument_coef),
             endogeneity=float(endogeneity),
             common_endogeneity=float(common_endogeneity),
+            price_distribution=price_distribution,
+            n_price_points=int(n_price_points),
+            heteroskedasticity=heteroskedasticity,
             lambda_period=lambda_period,
             noise_sigma=float(noise_sigma),
             promotions=bool(promotions),
@@ -970,6 +1098,9 @@ def generate_mock_data(
         n_instruments=int(n_instruments),
         instrument_coef=float(instrument_coef),
         endogeneity=float(endogeneity),
+        price_distribution=price_distribution,
+        n_price_points=int(n_price_points),
+        heteroskedasticity=heteroskedasticity,
         promo_elasticity=None if not promotions else float(true_promo_elasticity),
         lambda_period=np.asarray(lambda_period, dtype=np.float64).copy(),
         common_shock_sigma=float(common_shock_sigma),

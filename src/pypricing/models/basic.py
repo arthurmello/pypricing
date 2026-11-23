@@ -24,6 +24,7 @@ from pypricing.model_components.cross_elasticity import (
     validate_cross_elasticity_config,
 )
 from pypricing.data import CrossPairIndex, PanelColumns, PricePanelData
+from pypricing.endogeneity import EndogeneityMethod, IVMethod
 from pypricing.data.price_panel import (
     decompose_log_price,
     floor_censored_fraction,
@@ -141,7 +142,9 @@ class DemandModel:
         Column names and panel knobs (SKU / price / quantity, controls,
         instruments, hierarchy, period / region). Defaults to ``PanelColumns()``.
         ``iv_columns`` (or auto-detected ``iv_*`` columns) enable control-function
-        IV on the log-demand model classes. ``discount_col``, when set, splits
+        IV on the log-demand model classes. After ``build_model``, that correction
+        is ``endogeneity_method_`` (an ``IVMethod``); it is ``None`` without
+        instruments. ``discount_col``, when set, splits
         own-price response into a regular-price elasticity (``elasticity_sku``,
         the curve at regular price) and a log-linear promo elasticity
         (``promo_elasticity_sku``). ``predict`` then requires that column;
@@ -213,6 +216,7 @@ class DemandModel:
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.iv_names_: tuple[str, ...] = ()
+        self.endogeneity_method_: EndogeneityMethod | None = None
         self.log_price_midpoint_sku_: np.ndarray | None = None
         self.sku_mean_log_price_: np.ndarray | None = None
         self.period_levels_: np.ndarray | None = None
@@ -534,6 +538,20 @@ class DemandModel:
             cross_term = pt.dot(X_cross, gamma_pair)
         return cross_term
 
+    def _endogeneity_term(self, data: PricePanelData) -> Any:
+        """Demand-mean term from the active endogeneity method, or 0."""
+        method = self.endogeneity_method_
+        if method is None:
+            return 0.0
+        return method.pymc_term(
+            self.model_config,
+            data,
+            trend=self.trend,
+            t0=self.t0_,
+            seasonality_components=self.seasonality_,
+            time_effects=self.time_effects,
+        )
+
     def build_model(self, data: pd.DataFrame) -> None:
         self._validate_configuration()
         self._validate_time_effect_cells(data)
@@ -606,6 +624,7 @@ class DemandModel:
         self.period_levels_ = panel.period_levels
         self.region_levels_ = panel.region_levels
 
+        self.endogeneity_method_ = IVMethod() if panel.n_iv else None
         self.model = self._build_pymc_model(panel)
         self.sku_levels_ = panel.sku_levels
         self.control_names_ = panel.control_names

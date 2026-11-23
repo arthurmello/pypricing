@@ -14,7 +14,6 @@ from pypricing.model_components.priors import (
 )
 from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
-from pypricing.model_components.iv_terms import get_control_function_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
 from pypricing.model_components.promo_terms import get_promo_term
 from pypricing.model_components.time_terms import (
@@ -82,14 +81,7 @@ class LogLogDemandModel(DemandModel):
             period_term = get_period_effect_term(
                 self.model_config, data, self.time_effects
             )
-            control_function_term = get_control_function_term(
-                self.model_config,
-                data,
-                trend=self.trend,
-                t0=self.t0_,
-                seasonality_components=self.seasonality_,
-                time_effects=self.time_effects,
-            )
+            control_function_term = self._endogeneity_term(data)
 
             mu = (
                 alpha_sku[obs_sku]
