@@ -14,7 +14,7 @@ from pypricing.diagnostics.identification import (
     iv_diagnostics,
 )
 from pypricing.endogeneity.base import Assumption, AssumptionReport, QuickEstimate
-from pypricing.endogeneity.design import exogenous_design
+from pypricing.endogeneity.design import exogenous_design, log_regular_price
 from pypricing.model_components.iv_terms import get_control_function_term
 
 if TYPE_CHECKING:
@@ -44,10 +44,21 @@ class IVMethod:
 
     name = "iv"
 
+    def __init__(self, instruments: np.ndarray | None = None) -> None:
+        """``instruments`` replaces the panel's ``iv_*`` columns when supplied.
+
+        Lewbel passes the instruments it built. The default reads them from
+        the frame, which is the external-instrument path.
+        """
+        if instruments is not None:
+            instruments = np.asarray(instruments, dtype=np.float64)
+            if instruments.ndim == 1:
+                instruments = instruments.reshape(-1, 1)
+        self._instruments = instruments
+
     def prepare(self, model: DemandModel) -> IVPrepared:
         """Residual of log regular price on the exogenous design plus instruments."""
-        self._require_instruments(model)
-        instruments, log_price = _instruments_and_log_price(model)
+        instruments, log_price = self._instruments_and_price(model)
         exogenous = exogenous_design(model)
         fitted = _fitted(log_price, np.column_stack([exogenous, instruments]))
         quantity = model.data[model.quantity_col].to_numpy(dtype=np.float64)
@@ -68,25 +79,23 @@ class IVMethod:
         """
         if model.data is None or model.sku_levels_ is None:
             raise RuntimeError("Build the model before checking IV assumptions.")
-        if not model.iv_names_:
-            return AssumptionReport(
-                method=self.name,
-                assumptions=(
-                    Assumption(
-                        "instruments",
-                        "fail",
-                        "No instruments. Set PanelColumns.iv_columns or add iv_* columns.",
-                    ),
-                ),
-            )
-        instruments, log_price = _instruments_and_log_price(model)
+        if self._instruments is None and not model.iv_names_:
+            return self._no_instruments()
+        if self._instruments is not None and self._instruments.shape[1] == 0:
+            return self._no_instruments()
+        instruments, log_price = self._instruments_and_price(model)
         exogenous = exogenous_design(model)
         f_stat = first_stage_partial_f(log_price, instruments, exogenous)
+        n_instruments = (
+            len(model.iv_names_)
+            if self._instruments is None
+            else instruments.shape[1]
+        )
         assumptions = [
             Assumption(
                 "instruments",
                 "pass",
-                f"{len(model.iv_names_)} instrument(s).",
+                f"{n_instruments} instrument(s).",
             )
         ]
         if f_stat == 0.0:
@@ -162,6 +171,7 @@ class IVMethod:
             t0=t0,
             seasonality_components=seasonality_components,
             time_effects=time_effects,
+            instruments=self._instruments,
         )
 
     def summarize_posterior(
@@ -182,15 +192,31 @@ class IVMethod:
             }
         }
 
-    @staticmethod
-    def _require_instruments(model: DemandModel) -> None:
+    def _instruments_and_price(
+        self, model: DemandModel
+    ) -> tuple[np.ndarray, np.ndarray]:
         if model.data is None or model.sku_levels_ is None:
             raise RuntimeError("Build the model before preparing IV.")
+        if self._instruments is not None:
+            return self._instruments, log_regular_price(model)
         if not model.iv_names_:
             raise ValueError(
                 "IVMethod requires instruments. Set PanelColumns.iv_columns "
                 "or add iv_* columns."
             )
+        return _instruments_and_log_price(model)
+
+    def _no_instruments(self) -> AssumptionReport:
+        return AssumptionReport(
+            method=self.name,
+            assumptions=(
+                Assumption(
+                    "instruments",
+                    "fail",
+                    "No instruments. Set PanelColumns.iv_columns or add iv_* columns.",
+                ),
+            ),
+        )
 
 
 def _fitted_coef(y: np.ndarray, x: np.ndarray) -> np.ndarray:

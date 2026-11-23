@@ -184,7 +184,10 @@ class DemandModel:
         uses control-function IV when instrument columns are present, and no
         correction otherwise. ``"copula"`` adds a Gaussian-copula control from
         the price residual; it is identified only when that residual is not
-        normal. ``"iv"`` requires instruments. On
+        normal. ``"lewbel"`` builds instruments from a heteroskedastic price
+        residual and estimates them with the IV control function. It is not
+        identified when that residual is homoskedastic, or when every exogenous
+        regressor is constant. ``"iv"`` requires instruments. On
         ``QuadraticLogDemandModel`` and ``SigmoidSaturationDemandModel``,
         setting this warns: a control function in a nonlinear curve needs a
         stronger assumption than in a linear one. ``predict`` and
@@ -608,7 +611,7 @@ class DemandModel:
         *,
         method: str = "copula",
     ) -> dict[str, Any]:
-        """Fast copula or IV check: assumptions and a point estimate, no MCMC.
+        """Fast copula, Lewbel, or IV check: assumptions and a point estimate, no MCMC.
 
         Builds the model with ``method``. When the verdict is ``not identified``
         the result has no ``estimate``. A ``weak`` verdict still includes one.
@@ -621,7 +624,7 @@ class DemandModel:
         impl = self.endogeneity_method_
         if impl is None:
             raise ValueError(
-                "No endogeneity method to check. Pass method='copula' or 'iv'."
+                "No endogeneity method to check. Pass method='copula', 'lewbel', or 'iv'."
             )
         report = impl.check_assumptions(self)
         result: dict[str, Any] = {
@@ -765,7 +768,7 @@ class DemandModel:
         self.build_model(data)
         if (
             self.endogeneity_method_ is not None
-            and self.endogeneity_method_.name == "copula"
+            and self.endogeneity_method_.name != "iv"
         ):
             self.endogeneity_method_.check_assumptions(self)
         self.fit_kwargs_ = dict(sample_kwargs)

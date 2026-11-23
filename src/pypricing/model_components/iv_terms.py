@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
@@ -27,15 +28,18 @@ def get_control_function_term(
     t0: Any,
     seasonality_components: tuple[str, ...] | None,
     time_effects: TimeEffectsKind | None = None,
+    instruments: np.ndarray | None = None,
 ) -> Any:
     """Price equation residual times shared ``rho``; 0.0 when there are no instruments.
 
     The outcome is log regular price (equal to log paid price when the panel has
     no discount column). The discount index is not instrumented: temporary
     discounts are assumed exogenous and enter demand only through
-    ``promo_elasticity_sku``.
+    ``promo_elasticity_sku``. ``instruments`` replaces the panel's instrument
+    columns when a method built them itself.
     """
-    if data.n_iv == 0:
+    matrix = data.iv_matrix if instruments is None else _instrument_matrix(instruments)
+    if matrix.shape[1] == 0:
         return 0.0
 
     obs_sku = pt.constant(data.obs_sku_idx)
@@ -50,7 +54,7 @@ def get_control_function_term(
     )
     iv_term = get_linear_term(
         model_config,
-        data.iv_matrix,
+        matrix,
         param_name="pi",
         default_sigma=1.0,
     )
@@ -105,3 +109,10 @@ def get_control_function_term(
         default_kwargs={"mu": 0.0, "sigma": 1.0},
     )
     return rho * residual
+
+
+def _instrument_matrix(instruments: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(instruments, dtype=np.float64)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(-1, 1)
+    return matrix
