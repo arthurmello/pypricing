@@ -191,7 +191,8 @@ class DemandModel:
         regressor is constant. ``"latent"`` is experimental: it treats the
         unobserved driver of price as a discrete mixture and is not identified
         when a single normal fits that residual as well. ``"iv"`` requires
-        instruments. On
+        instruments. ``compare_endogeneity`` runs the fast check for each
+        method. On
         ``QuadraticLogDemandModel`` and ``SigmoidSaturationDemandModel``,
         setting this warns: a control function in a nonlinear curve needs a
         stronger assumption than in a linear one. ``predict`` and
@@ -648,6 +649,28 @@ class DemandModel:
         if report.verdict() != "not identified":
             result["estimate"] = impl.quick_estimate(self, report)
         return result
+
+    def compare_endogeneity(
+        self,
+        data: pd.DataFrame,
+        *,
+        methods: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        """Fast comparison of endogeneity corrections. No MCMC.
+
+        One row per method, plus an ``ols`` row for the uncorrected regression.
+        ``methods`` defaults to copula, latent IV, and Lewbel, and includes IV
+        when the frame has instruments. At least two methods are required. IV
+        with no instruments is a ``not identified`` row.
+
+        The call does not change this model. Fit the method you keep. If that
+        fit's correction interval includes 0, there is no evidence of
+        endogeneity: use the uncorrected model, because the correction adds
+        noise.
+        """
+        from pypricing.endogeneity.compare import comparison_frame
+
+        return comparison_frame(self, data, methods=methods)
 
     def build_model(
         self, data: pd.DataFrame, *, endogeneity: str | None = None

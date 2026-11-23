@@ -160,7 +160,9 @@ out = model.check_instruments(compare_ols=False)  # instant, no IV vs OLS compar
 - `rho`: the endogeneity term. An HDI excluding 0 means price responds to
   demand shocks, so the correction matters. An HDI that includes 0 is no
   evidence of endogeneity; the instrumented elasticities are noisier, so
-  drop the instruments.
+  drop the instruments. The same decision applies to copula, Lewbel, and
+  latent IV: if `rho_copula` or `rho_latent` includes 0, use the uncorrected
+  model. See [Identification](identification.md#without-an-external-instrument).
 - `elasticity`: elasticities with instruments (`iv`) and from a refit without
   them (`ols`). Large shifts mean the instruments change the answer, which is
   reassuring only if the first two checks pass.
