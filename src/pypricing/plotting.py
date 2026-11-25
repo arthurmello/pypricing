@@ -4,27 +4,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable, Literal
 
-import arviz as az
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xarray as xr
+
+from pypricing.arviz_compat import hdi_bounds
 
 if TYPE_CHECKING:  # pragma: no cover
     from pypricing.models.basic import DemandModel
 
 
 def _extract_hdi(draws: np.ndarray, *, hdi_prob: float) -> tuple[float, float]:
-    hdi = az.hdi(draws, hdi_prob=hdi_prob)
-    # `az.hdi` typically returns an xarray.DataArray with `hdi` coordinate.
-    if isinstance(hdi, xr.DataArray):
-        lower = float(hdi.sel(hdi="lower").values)
-        upper = float(hdi.sel(hdi="higher").values)
-        return lower, upper
-    if isinstance(hdi, (np.ndarray, list, tuple)):
-        arr = np.asarray(hdi).reshape(-1)
-        return float(arr[0]), float(arr[1])
-    raise TypeError(f"Unexpected HDI return type: {type(hdi)}")
+    lower, upper = hdi_bounds(draws, hdi_prob)
+    return float(np.asarray(lower)), float(np.asarray(upper))
 
 
 def _sku_price_grid_design(

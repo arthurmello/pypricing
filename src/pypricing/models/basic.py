@@ -17,6 +17,7 @@ import pymc as pm
 import xarray as xr
 import pytensor.tensor as pt
 
+from pypricing.arviz_compat import add_dataset_group, hdi_bounds, read_netcdf, summary
 from pypricing.model_components.cross_elasticity import (
     CrossElasticitySpec,
     build_gamma_pair,
@@ -73,16 +74,6 @@ def _json_default(obj: Any) -> Any:
             if not callable(value) and not key.startswith("_")
         }
     return str(obj)
-
-
-def _read_netcdf(path: str | Path) -> az.InferenceData:
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            category=UserWarning,
-            message=r"fit_data group is not defined in the InferenceData scheme",
-        )
-        return az.from_netcdf(path)
 
 
 def _seasonality_to_json(
@@ -520,7 +511,7 @@ class DemandModel:
 
     @classmethod
     def load(cls, fname: str, check: bool = True) -> Self:
-        idata = _read_netcdf(fname)
+        idata = read_netcdf(fname)
         try:
             return cls.load_from_idata(idata, check=check)
         except DifferentModelError as exc:
@@ -553,10 +544,7 @@ class DemandModel:
         fit_data = data.to_xarray()
         if self.idata is None:
             raise RuntimeError("No idata available to attach fit_data.")
-        if "fit_data" in self.idata:
-            del self.idata.fit_data
-        with np.errstate(all="ignore"):
-            self.idata.add_groups(fit_data=fit_data)
+        add_dataset_group(self.idata, "fit_data", fit_data)
 
     def _cross_term(self, data: PricePanelData) -> pt.TensorVariable:
         cross_term = 0.0
@@ -857,7 +845,7 @@ class DemandModel:
             ]
             candidates.append("gamma_pair")
             var_names = [v for v in candidates if v in self.idata.posterior]
-        return az.summary(self.idata, var_names=var_names, **summary_kwargs)
+        return summary(self.idata, var_names=var_names, **summary_kwargs)
 
     def run_diagnostics(
         self,
@@ -1509,18 +1497,15 @@ class DemandModel:
         )
         q = ds["quantity"]
         mean = q.mean(dim=("chain", "draw")).to_numpy()
-        hdi = az.hdi(q, hdi_prob=hdi_prob)
-        hdi_q = hdi["quantity"] if isinstance(hdi, xr.Dataset) else hdi
-        lower = hdi_q.sel(hdi="lower").to_numpy()
-        upper = hdi_q.sel(hdi="higher").to_numpy()
+        lower, upper = hdi_bounds(q, hdi_prob)
 
         out = df.copy()
         out["quantity_mean"] = mean
         out["log_quantity_mean"] = (
             ds["log_quantity"].mean(dim=("chain", "draw")).to_numpy()
         )
-        out["quantity_hdi_lower"] = lower
-        out["quantity_hdi_upper"] = upper
+        out["quantity_hdi_lower"] = np.asarray(lower)
+        out["quantity_hdi_upper"] = np.asarray(upper)
         return out
 
     def train_test_split(

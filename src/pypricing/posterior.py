@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import arviz as az
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+from pypricing.arviz_compat import hdi_bounds
 
 if TYPE_CHECKING:  # pragma: no cover
     from pypricing.models.basic import DemandModel
@@ -59,15 +60,14 @@ def summarize_quantity_multiplier_by_sku(
         price_multiplier=price_multiplier,
     )
     mean = mult.mean(dim=("chain", "draw"))
-    hdi = az.hdi(mult, hdi_prob=hdi_prob)
-    hdi_mult = hdi[mult.name] if isinstance(hdi, xr.Dataset) else hdi
+    lower, upper = hdi_bounds(mult, hdi_prob)
 
     out = pd.DataFrame(
         {
             "sku": np.asarray(model.sku_levels_),
             "quantity_multiplier_mean": mean.to_numpy(),
-            "quantity_multiplier_hdi_lower": hdi_mult.sel(hdi="lower").to_numpy(),
-            "quantity_multiplier_hdi_upper": hdi_mult.sel(hdi="higher").to_numpy(),
+            "quantity_multiplier_hdi_lower": np.asarray(lower),
+            "quantity_multiplier_hdi_upper": np.asarray(upper),
         }
     )
     return out.set_index("sku")
@@ -96,14 +96,9 @@ def summarize_quantity_multiplier_one_sku(
         raise ValueError("Invalid `sku` for summarize_quantity_multiplier_one_sku.")
 
     draws = mult.sel(sku=sku_idx).values.flatten()
-    hdi = az.hdi(draws, hdi_prob=hdi_prob)
-    if isinstance(hdi, xr.DataArray):
-        lower = float(hdi.sel(hdi="lower").values)
-        upper = float(hdi.sel(hdi="higher").values)
-    else:
-        arr = np.asarray(hdi).reshape(-1)
-        lower = float(arr[0])
-        upper = float(arr[1])
+    lower, upper = hdi_bounds(draws, hdi_prob)
+    lower = float(np.asarray(lower))
+    upper = float(np.asarray(upper))
 
     return {
         "quantity_multiplier_draws": draws,

@@ -3,10 +3,10 @@ from __future__ import annotations
 import warnings
 from typing import TYPE_CHECKING, Any
 
-import arviz as az
 import numpy as np
 import pandas as pd
 
+from pypricing.arviz_compat import hdi_bounds
 from pypricing.data import PanelColumns
 from pypricing.diagnostics import DiagnosticWarning
 from pypricing.posterior import get_elasticity_means
@@ -87,7 +87,8 @@ def check_falsification(
     lead_draws = np.asarray(
         with_lead.idata.posterior["beta_control"].values[..., -1]
     ).ravel()
-    lo, hi = (float(x) for x in az.hdi(lead_draws, hdi_prob=hdi_prob))
+    lo, hi = hdi_bounds(lead_draws, hdi_prob)
+    lo, hi = float(np.asarray(lo)), float(np.asarray(hi))
     excludes_zero = not (lo <= 0.0 <= hi)
     if excludes_zero:
         warnings.warn(
