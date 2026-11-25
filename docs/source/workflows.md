@@ -42,6 +42,15 @@ with model attrs.
 `<ModelClass>.load(path)` restores from that artifact and rebuilds the PyMC
 model.
 
+## Posterior SKU labels
+
+Per-SKU parameters such as `elasticity_sku` use the SKU id as the `sku`
+coordinate, in `sku_levels_` order. `sel(sku="10")` selects that SKU.
+`isel(sku=0)` selects the first level. `sel(sku=0)` does not.
+
+`model.elasticities()` is a DataFrame of the posterior mean and HDI, indexed
+by the SKU id.
+
 ## Quantity-multiplier helpers
 
 `pypricing.posterior.summarize_quantity_multiplier_one_sku(...)` converts

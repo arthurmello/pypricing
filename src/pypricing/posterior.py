@@ -20,6 +20,35 @@ def _require_log_log(model: "DemandModel") -> None:
         )
 
 
+def elasticities(model: "DemandModel", *, hdi_prob: float = 0.9) -> pd.DataFrame:
+    """Posterior mean and HDI of own-price elasticity, indexed by SKU label."""
+    model._require_fitted()
+    assert model.idata is not None
+    draws = model.idata.posterior["elasticity_sku"]
+    mean = draws.mean(dim=("chain", "draw"))
+    lower, upper = hdi_bounds(draws, hdi_prob)
+    return pd.DataFrame(
+        {
+            "mean": np.asarray(mean),
+            "hdi_lower": np.asarray(lower),
+            "hdi_upper": np.asarray(upper),
+        },
+        index=_sku_index(model, mean.coords["sku"].values),
+    )
+
+
+def _sku_index(model: "DemandModel", coord_values: Any) -> pd.Index:
+    values = np.asarray(coord_values)
+    levels = model.sku_levels_
+    if (
+        levels is not None
+        and len(levels) == len(values)
+        and np.array_equal(values, np.arange(len(values)))
+    ):
+        return pd.Index(levels, name=model.sku_col)
+    return pd.Index(values, name=model.sku_col)
+
+
 def get_elasticity_means(model: "DemandModel") -> pd.Series:
     """Posterior mean own-price elasticity per SKU."""
     model._require_fitted()
@@ -95,7 +124,11 @@ def summarize_quantity_multiplier_one_sku(
     else:
         raise ValueError("Invalid `sku` for summarize_quantity_multiplier_one_sku.")
 
-    draws = mult.sel(sku=sku_idx).values.flatten()
+    label = sku_levels[sku_idx]
+    if label in mult.coords["sku"]:
+        draws = mult.sel(sku=label).values.flatten()
+    else:
+        draws = mult.isel(sku=sku_idx).values.flatten()
     lower, upper = hdi_bounds(draws, hdi_prob)
     lower = float(np.asarray(lower))
     upper = float(np.asarray(upper))

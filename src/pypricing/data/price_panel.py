@@ -784,7 +784,7 @@ class PricePanelData:
 
     def coords(self) -> dict[str, Any]:
         out: dict[str, Any] = {
-            "sku": np.arange(self.n_skus),
+            "sku": np.asarray(self.sku_levels),
             "obs": np.arange(self.n_obs),
         }
         if self.hierarchy is not None:

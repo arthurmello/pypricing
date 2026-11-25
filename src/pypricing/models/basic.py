@@ -1659,6 +1659,12 @@ class DemandModel:
             minimize_options=minimize_options,
         )
 
+    def elasticities(self, *, hdi_prob: float = 0.9) -> pd.DataFrame:
+        """Posterior mean and HDI of own-price elasticity, one row per SKU label."""
+        from pypricing.posterior import elasticities as _elasticities
+
+        return _elasticities(self, hdi_prob=hdi_prob)
+
     def quantity_multiplier_summary(
         self,
         *,

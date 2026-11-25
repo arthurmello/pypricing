@@ -24,6 +24,22 @@ def test_from_frame_basic():
     assert d.iv_matrix.shape == (3, 0)
     assert d.n_iv == 0
     assert np.array_equal(d.obs_sku_idx, [0, 0, 1])
+    assert list(d.coords()["sku"]) == list(d.sku_levels)
+
+
+def test_sku_coord_is_the_label_and_codes_stay_positional():
+    df = pd.DataFrame(
+        {
+            "sku": ["9", "10", "9"],
+            "price": [10.0, 12.0, 11.0],
+            "quantity": [5.0, 4.0, 6.0],
+        }
+    )
+    panel = PricePanelData.from_frame(df)
+    assert list(panel.coords()["sku"]) == list(panel.sku_levels)
+    assert set(map(str, panel.coords()["sku"])) == {"10", "9"}
+    assert str(panel.sku_levels[panel.obs_sku_idx[0]]) == "9"
+    assert str(panel.sku_levels[panel.obs_sku_idx[1]]) == "10"
 
 
 def test_zero_quantity_floor():
