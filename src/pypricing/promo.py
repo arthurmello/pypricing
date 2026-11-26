@@ -416,6 +416,25 @@ class PromoOptions:
     unit_cols: tuple[str, ...] = ()
 
 
+def default_promo_type(model: DemandModel) -> str | None:
+    """The most common promo type on discounted training rows: the plain discount.
+
+    Used when the caller doesn't choose promo types, so the optimizer picks a
+    discount depth only and never adds a mechanic (flyer, display, bundle)
+    that has a cost the model does not know about.
+    """
+    if model.promo is None or model.promo.type_col is None or model.data is None:
+        return None
+    cols = model.panel_columns
+    data = model.data
+    on = data[data[cols.discount_col] > 0][model.promo.type_col].astype(str)
+    on = on[on.isin(model.promo_type_levels_ or ())]
+    if on.empty:
+        levels = list(model.promo_type_levels_ or [])
+        return levels[0] if levels else None
+    return str(on.value_counts().index[0])
+
+
 def promo_options(
     model: DemandModel,
     base_frame: pd.DataFrame,
@@ -429,6 +448,9 @@ def promo_options(
 ) -> PromoOptions:
     """Incremental outcome of each option for each unit, all else at regular price.
 
+    ``promo_types=None`` on a model with promo types uses only the most common
+    one (:func:`default_promo_type`), so only the depth is chosen.
+
     Without coupling terms each option is evaluated for all units in one pass.
     With within-group pressure or cross-price terms each unit is evaluated on
     its own, so the numbers are the unit's marginal effect (its own lift minus
@@ -441,7 +463,8 @@ def promo_options(
     if promo_types is not None and type_col is None:
         raise ValueError("promo_types needs a model fit with PromoSpec.type_col")
     if type_col is not None and promo_types is None:
-        promo_types = list(model.promo_type_levels_ or [])[:1] or None
+        plain = default_promo_type(model)
+        promo_types = [plain] if plain is not None else None
     units = _units(base_frame, unit_cols)
     options = _option_grid(discounts, promo_types)
     n_u, n_o = len(units), len(options)

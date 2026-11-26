@@ -192,3 +192,14 @@ def test_best_plan_is_best_on_joint_simulation(fitted):
     )
     c = result.comparison.drop(index="baseline")
     assert c["mean"].idxmax() == "best"
+
+
+def test_default_promo_type_is_most_common_not_alphabetical(fitted):
+    from pypricing.promo import default_promo_type, promo_options
+
+    model, df = fitted
+    common = df.loc[df["discount"] > 0, "promo_type"].value_counts().index[0]
+    assert default_promo_type(model) == common
+    opts = promo_options(model, plan_frame(model, 2), discounts=(0.1,))
+    promo_rows = opts.table[opts.table["discount"] > 0]
+    assert set(promo_rows["promo_type"]) == {common}
