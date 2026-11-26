@@ -179,7 +179,8 @@ class DemandModel:
         correlated with a SKU's price level. Default ``False``.
     promo
         Extra promo terms (:class:`PromoSpec`): curved depth response,
-        promo-mechanic effects and post-promo lags.
+        promo-mechanic effects, post-promo lags and within-group
+        cannibalization (``pressure_level`` needs ``group_columns``).
         Requires ``panel_columns.discount_col``. ``None`` (default) keeps the
         log-linear promo term only.
     varying_controls
@@ -251,6 +252,7 @@ class DemandModel:
             tuple(varying_controls) if varying_controls else None
         )
         self.varying_control_idx_: tuple[int, ...] = ()
+        self.pressure_group_codes_: np.ndarray | None = None
         self._fit_extra_: ExtraFeatures | None = None
         self.promo_type_levels_: tuple[str, ...] | None = None
         self.sku_levels_: pd.Index | None = None
@@ -389,6 +391,13 @@ class DemandModel:
             )
         if self.promo is not None and self.panel_columns.discount_col is None:
             raise ValueError("promo requires panel_columns.discount_col")
+        if self.promo is not None and self.promo.pressure_level is not None:
+            groups = self.panel_columns.group_columns or ()
+            if self.promo.pressure_level >= len(groups):
+                raise ValueError(
+                    "PromoSpec.pressure_level indexes group_columns; got "
+                    f"{self.promo.pressure_level} with group_columns={groups!r}"
+                )
 
     @property
     def default_model_config(self) -> dict:
@@ -796,6 +805,13 @@ class DemandModel:
             self.varying_control_idx_ = tuple(
                 panel.control_names.index(c) for c in self.varying_controls
             )
+        self.pressure_group_codes_ = None
+        if self.promo is not None and self.promo.pressure_level is not None:
+            assert panel.hierarchy is not None
+            self.pressure_group_codes_ = np.asarray(
+                panel.hierarchy.sku_to_level_idx[:, self.promo.pressure_level],
+                dtype=np.int64,
+            )
         self._fit_extra_ = self._extra_features(
             data,
             obs_sku_idx=panel.obs_sku_idx,
@@ -827,6 +843,11 @@ class DemandModel:
             X_control=X_control,
             varying_idx=self.varying_control_idx_,
             varying_names=self.varying_controls or (),
+            row_group=(
+                None
+                if self.pressure_group_codes_ is None
+                else self.pressure_group_codes_[obs_sku_idx]
+            ),
         )
 
     def _extra_for_regular_price(

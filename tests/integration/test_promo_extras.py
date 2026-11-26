@@ -104,3 +104,41 @@ def test_varying_controls_must_be_controls(panel):
     model = _model(varying_controls=("not_a_control",))
     with pytest.raises(ValueError, match="varying_controls"):
         model.build_model(df)
+
+
+def test_within_category_cannibalization(panel):
+    df, truth = panel
+    model = _model(promo=PromoSpec(pressure_level=0))
+    model.fit(df, **SAMPLE)
+    pressure = float(model.idata.posterior["mu_promo_pressure"].mean())
+    assert pressure < 0
+    pred = model.predict(df[df["period"] == df["period"].max()])
+    assert np.isfinite(pred["quantity_mean"]).all()
+
+
+def test_pressure_needs_groups():
+    with pytest.raises(ValueError, match="pressure_level"):
+        LogLogDemandModel(
+            panel_columns=PanelColumns(discount_col="discount"),
+            promo=PromoSpec(pressure_level=0),
+        )
+
+
+def test_full_promo_spec_round_trip(panel, tmp_path):
+    from pypricing import add_event_columns
+
+    df, _ = panel
+    df = add_event_columns(df)
+    spec = PromoSpec(depth="quadratic", type_col="promo_type", lags=1, pressure_level=0)
+    model = _model(promo=spec, varying_controls=("control_log_competitor_price",))
+    model.fit(df, **SAMPLE)
+    assert "control_event_black_friday" in model.control_names_
+    path = tmp_path / "full.nc"
+    model.save(str(path))
+    loaded = LogLogDemandModel.load(str(path))
+    assert loaded.promo == spec
+    last = df[df["period"] >= df["period"].unique()[-3]]
+    np.testing.assert_allclose(
+        loaded.predict(last, random_seed=1)["quantity_mean"],
+        model.predict(last, random_seed=1)["quantity_mean"],
+    )

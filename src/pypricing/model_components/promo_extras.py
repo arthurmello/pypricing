@@ -12,6 +12,11 @@
   ``k`` rows earlier (by ``period_col``, within region). A negative value is a
   post-promo dip (pull-forward / stockpiling). Rows without history use 0, so
   predict on frames that include the preceding periods when lags matter.
+- ``pressure_level=g``: cannibalization within a group of ``group_columns``
+  (level ``g``, e.g. category). The feature is the mean depth of the *other*
+  SKUs in the same group and period (and region); its coefficient
+  ``promo_pressure_group`` is pooled across groups. Negative means a promo on
+  one SKU takes sales from the rest of its group.
 
 Separately, ``varying_controls`` on the model gives the named control columns
 a per-SKU slope: the shared ``beta_control`` plus a zero-mean deviation pooled
@@ -45,8 +50,13 @@ class PromoSpec:
     depth: DepthKind = "log_linear"
     type_col: str | None = None
     lags: int = 0
+    pressure_level: int | None = None
 
     def __post_init__(self) -> None:
+        if self.pressure_level is not None and (
+            not isinstance(self.pressure_level, int) or self.pressure_level < 0
+        ):
+            raise ValueError("PromoSpec.pressure_level must be a non-negative int")
         if not isinstance(self.lags, int) or self.lags < 0:
             raise ValueError(
                 f"PromoSpec.lags must be a non-negative int; got {self.lags!r}"
@@ -57,7 +67,12 @@ class PromoSpec:
             )
 
     def to_json(self) -> dict[str, Any]:
-        return {"depth": self.depth, "type_col": self.type_col, "lags": self.lags}
+        return {
+            "depth": self.depth,
+            "type_col": self.type_col,
+            "lags": self.lags,
+            "pressure_level": self.pressure_level,
+        }
 
     @classmethod
     def from_json(cls, raw: dict[str, Any] | None) -> PromoSpec | None:
@@ -75,6 +90,9 @@ class ExtraFeatures:
     type_levels: tuple[str, ...] = ()
     lag_matrix: np.ndarray | None = None
     varying_X: np.ndarray | None = None
+    pressure: np.ndarray | None = None
+    pressure_group_idx: np.ndarray | None = None
+    pressure_level: int | None = None
     varying_names: tuple[str, ...] = ()
 
     def is_empty(self) -> bool:
@@ -83,6 +101,7 @@ class ExtraFeatures:
             and self.type_onehot is None
             and self.lag_matrix is None
             and self.varying_X is None
+            and self.pressure is None
         )
 
 
@@ -129,6 +148,30 @@ def lagged_depth(
     return out
 
 
+def group_pressure(
+    df: pd.DataFrame,
+    panel_columns: PanelColumns,
+    z: np.ndarray,
+    row_group: np.ndarray,
+) -> np.ndarray:
+    """Mean depth of the other rows in the same group and period (and region)."""
+    period_col = panel_columns.period_col
+    if period_col not in df.columns:
+        raise ValueError(f"PromoSpec.pressure_level requires column {period_col!r}")
+    keys = {"_p": df[period_col].to_numpy(), "_g": row_group}
+    if panel_columns.region_col is not None and panel_columns.region_col in df.columns:
+        keys["_r"] = df[panel_columns.region_col].to_numpy()
+    tmp = pd.DataFrame(keys)
+    tmp["_z"] = z
+    grouped = tmp.groupby(list(keys), sort=False)["_z"]
+    total = grouped.transform("sum").to_numpy()
+    count = grouped.transform("size").to_numpy()
+    out = np.zeros(len(df), dtype=np.float64)
+    many = count > 1
+    out[many] = (total[many] - z[many]) / (count[many] - 1)
+    return out
+
+
 def build_extra_features(
     *,
     spec: PromoSpec | None,
@@ -140,6 +183,7 @@ def build_extra_features(
     X_control: np.ndarray | None = None,
     varying_idx: tuple[int, ...] = (),
     varying_names: tuple[str, ...] = (),
+    row_group: np.ndarray | None = None,
 ) -> ExtraFeatures:
     """Features for ``spec`` and varying controls.
 
@@ -177,6 +221,12 @@ def build_extra_features(
         if df is None or panel_columns is None:
             raise ValueError("lag features need the data frame and panel columns")
         feats.lag_matrix = lagged_depth(df, panel_columns, z, spec.lags)
+    if spec.pressure_level is not None:
+        if df is None or panel_columns is None or row_group is None:
+            raise ValueError("pressure features need the frame and row groups")
+        feats.pressure = group_pressure(df, panel_columns, z, row_group)
+        feats.pressure_group_idx = np.asarray(row_group, dtype=np.int64)
+        feats.pressure_level = spec.pressure_level
     return feats
 
 
@@ -214,6 +264,10 @@ def extra_mu_term(
     if feats.varying_X is not None:
         dev = _varying_slopes(model_config, data, feats.varying_names)
         term = term + pt.sum(dev[obs_sku] * pt.constant(feats.varying_X), axis=1)
+    if feats.pressure is not None:
+        pressure = _pressure_by_group(model_config, feats.pressure_level)
+        group_idx = pt.constant(feats.pressure_group_idx)
+        term = term + pressure[group_idx] * pt.constant(feats.pressure)
     if feats.lag_matrix is not None:
         pm.modelcontext(None).add_coord(
             "lag", list(range(1, feats.lag_matrix.shape[1] + 1))
@@ -227,6 +281,31 @@ def extra_mu_term(
         )
         term = term + pt.dot(pt.constant(feats.lag_matrix), lag)
     return term
+
+
+def _pressure_by_group(model_config: dict[str, Any] | None, level: int | None) -> Any:
+    """Per-group cannibalization slope, partially pooled."""
+    dim = f"group_{level}"
+    mu = resolve_prior(
+        model_config=model_config,
+        param_name="mu_promo_pressure",
+        default_dist=pm.Normal,
+        default_kwargs={"mu": 0.0, "sigma": 1.0},
+    )
+    sigma = resolve_prior(
+        model_config=model_config,
+        param_name="sigma_promo_pressure",
+        default_dist=pm.HalfNormal,
+        default_kwargs={"sigma": 0.3},
+    )
+    eta = resolve_prior(
+        model_config=model_config,
+        param_name="eta_promo_pressure",
+        default_dist=pm.Normal,
+        default_kwargs={"mu": 0.0, "sigma": 1.0},
+        dims=dim,
+    )
+    return pm.Deterministic("promo_pressure_group", mu + sigma * eta, dims=dim)
 
 
 def _varying_slopes(
@@ -295,6 +374,9 @@ def add_extra(
     if feats.varying_X is not None and "beta_control_dev_sku" in posterior:
         dev = posterior["beta_control_dev_sku"].values[:, :, obs_sku_idx, :]
         mu = mu + np.einsum("cdov,ov->cdo", dev, feats.varying_X, optimize=True)
+    if feats.pressure is not None and "promo_pressure_group" in posterior:
+        slope = posterior["promo_pressure_group"].values[:, :, feats.pressure_group_idx]
+        mu = mu + slope * feats.pressure[None, None, :]
     if feats.lag_matrix is not None and "promo_lag" in posterior:
         lag = posterior["promo_lag"].values
         mu = mu + np.einsum("cdk,ok->cdo", lag, feats.lag_matrix, optimize=True)

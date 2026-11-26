@@ -58,3 +58,22 @@ def test_lagged_depth_by_sku_and_period():
         ]
     )
     np.testing.assert_allclose(feats.lag_matrix, expected)
+
+
+def test_group_pressure_excludes_own_row():
+    from pypricing import PanelColumns
+
+    df = pd.DataFrame({"sku": ["a", "b", "c", "a"], "period": [1, 1, 1, 2]})
+    d = np.array([0.2, 0.4, 0.0, 0.3])
+    z = -np.log(1 - d)
+    feats = build_extra_features(
+        spec=PromoSpec(pressure_level=0),
+        log_discount_index=np.log(1 - d),
+        n_obs=4,
+        df=df,
+        panel_columns=PanelColumns(),
+        row_group=np.array([0, 0, 0, 0]),
+    )
+    np.testing.assert_allclose(
+        feats.pressure, [(z[1] + z[2]) / 2, (z[0] + z[2]) / 2, (z[0] + z[1]) / 2, 0.0]
+    )
