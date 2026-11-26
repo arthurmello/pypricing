@@ -1546,13 +1546,14 @@ class DemandModel:
             )
         return periods, df[region_col].to_numpy()
 
-    def sample_posterior_predictive(
+    def _mu_draws(
         self,
         df: pd.DataFrame,
         *,
         random_seed: int | None = None,
         period_effect: Any = "neutral",
-    ) -> xr.Dataset:
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Mean log-quantity ``(chain, draw, n_obs)`` and ``sigma`` ``(chain, draw)``."""
         self._require_fitted()
         assert self.idata is not None
 
@@ -1577,7 +1578,6 @@ class DemandModel:
             X_control=X_control,
         )
         post = self.idata.posterior
-        sigma = post["sigma"].values
         mu = self.compute_mu_from_posterior(
             posterior=post,
             log_price=log_price,
@@ -1590,12 +1590,41 @@ class DemandModel:
             lambda_obs=lambda_obs,
             extra=extra,
         )
+        return mu, np.asarray(post["sigma"].values, dtype=np.float64)
 
+    def expected_quantity_draws(
+        self,
+        df: pd.DataFrame,
+        *,
+        random_seed: int | None = None,
+        period_effect: Any = "neutral",
+    ) -> np.ndarray:
+        """Expected quantity per posterior draw, ``exp(mu + sigma**2 / 2)``.
+
+        Shape ``(chain, draw, n_obs)``. No observation noise: use this to
+        compare scenarios on the same draws.
+        """
+        mu, sigma = self._mu_draws(
+            df, random_seed=random_seed, period_effect=period_effect
+        )
+        return np.exp(mu + 0.5 * np.square(sigma)[:, :, None])
+
+    def sample_posterior_predictive(
+        self,
+        df: pd.DataFrame,
+        *,
+        random_seed: int | None = None,
+        period_effect: Any = "neutral",
+    ) -> xr.Dataset:
+        mu, sigma = self._mu_draws(
+            df, random_seed=random_seed, period_effect=period_effect
+        )
+        post = self.idata.posterior
+        n_obs = len(df)
         rng = np.random.default_rng(random_seed)
         noise = rng.normal(size=mu.shape) * sigma[:, :, None]
         log_quantity = mu + noise
         quantity = np.exp(log_quantity)
-        n_obs = log_price.shape[0]
         obs = np.arange(n_obs, dtype=np.int64)
 
         return xr.Dataset(
