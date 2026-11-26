@@ -8,6 +8,7 @@ from pypricing.data import (
     apply_discount,
     floor_censored_fraction,
 )
+from pypricing.events import add_event_columns, event_indicators
 from pypricing.model_components.cross_elasticity import CrossElasticitySpec
 from pypricing.model_components.promo_extras import PromoSpec
 from pypricing.models import (
@@ -37,7 +38,9 @@ __all__ = [
     "LogLogDemandModel",
     "QuadraticLogDemandModel",
     "SigmoidSaturationDemandModel",
+    "add_event_columns",
     "apply_discount",
+    "event_indicators",
     "floor_censored_fraction",
     "generate_mock_data",
     "generate_promo_panel",
