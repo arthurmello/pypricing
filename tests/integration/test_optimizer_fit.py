@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pypricing import (
@@ -71,3 +72,30 @@ def test_controls_required_when_model_has_controls():
     bounds = {sku: (0.5, 50.0) for sku in model.sku_levels_}
     with pytest.raises(ValueError, match="controls_df"):
         model.optimize_prices(price_bounds=bounds)
+
+
+def test_margin_objective_has_interior_optimum_for_log_log():
+    df = generate_mock_data(n_periods=24, n_skus=2, n_controls=0, random_state=5)
+    model = LogLogDemandModel()
+    model.fit(
+        df,
+        draws=100,
+        tune=100,
+        chains=2,
+        random_seed=1,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    cost = {
+        sku: float(df.loc[df["sku"] == sku, "price"].median() * 0.4)
+        for sku in model.sku_levels_
+    }
+    bounds = {sku: (c * 1.01, c * 20) for sku, c in cost.items()}
+    out = model.optimize_prices(price_bounds=bounds, objective="margin", unit_cost=cost)
+    e = model.elasticities()["mean"]
+    for sku in model.sku_levels_:
+        if e[sku] < -1.2:
+            assert pd.isna(out.loc[sku, "at_bound"])
+            lerner = cost[sku] * e[sku] / (1 + e[sku])
+            assert abs(out.loc[sku, "optimal_price"] / lerner - 1) < 0.25
+    assert (out["mean_margin"] < out["mean_revenue"]).all()

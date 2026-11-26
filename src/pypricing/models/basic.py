@@ -1645,6 +1645,8 @@ class DemandModel:
         period_effect: Any = "neutral",
         random_seed: int | None = None,
         minimize_options: dict[str, Any] | None = None,
+        objective: str = "revenue",
+        unit_cost: dict[Any, float] | pd.Series | None = None,
     ) -> pd.DataFrame:
         from pypricing.optimizer import optimize_prices as _optimize_prices
 
@@ -1657,6 +1659,8 @@ class DemandModel:
             period_effect=period_effect,
             random_seed=random_seed,
             minimize_options=minimize_options,
+            objective=objective,
+            unit_cost=unit_cost,
         )
 
     def elasticities(self, *, hdi_prob: float = 0.9) -> pd.DataFrame:

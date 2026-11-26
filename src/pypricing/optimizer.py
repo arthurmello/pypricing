@@ -23,9 +23,12 @@ def mean_revenue_at_price(
     at_period: pd.Timestamp | str | None = None,
     period_effect: Any = "neutral",
     lambda_obs: np.ndarray | None = None,
+    unit_cost: float = 0.0,
 ) -> float:
     """
     Posterior mean of expected revenue for one SKU at a single price.
+
+    With ``unit_cost > 0`` this is expected margin, ``(price - unit_cost) * Q``.
 
     Expected quantity on a draw is ``exp(mu + sigma**2 / 2)``: ``mu`` is the
     demand-curve mean log-quantity, and the lognormal factor is the mean of
@@ -70,7 +73,7 @@ def mean_revenue_at_price(
         mu.shape[0], mu.shape[1]
     )
     expected_q = np.exp(mu + 0.5 * np.square(sigma)[:, :, None])
-    return float(np.mean(price * expected_q))
+    return float(np.mean((price - unit_cost) * expected_q))
 
 
 def _negative_mean_revenue(
@@ -80,6 +83,7 @@ def _negative_mean_revenue(
     X_row: np.ndarray | None,
     at_period: pd.Timestamp | str | None,
     lambda_obs: np.ndarray | None,
+    unit_cost: float = 0.0,
 ) -> float:
     p = float(np.exp(log_price))
     return -mean_revenue_at_price(
@@ -89,6 +93,7 @@ def _negative_mean_revenue(
         X_row=X_row,
         at_period=at_period,
         lambda_obs=lambda_obs,
+        unit_cost=unit_cost,
     )
 
 
@@ -102,8 +107,10 @@ def optimize_price_one_sku(
     at_period: pd.Timestamp | str | None = None,
     lambda_obs: np.ndarray | None = None,
     options: dict[str, Any] | None = None,
+    unit_cost: float = 0.0,
 ) -> float:
-    """Maximize posterior mean expected revenue over ``[price_low, price_high]``.
+    """Maximize posterior mean expected revenue (margin when ``unit_cost > 0``)
+    over ``[price_low, price_high]``.
 
     Scores a log-price grid, including both bounds, then polishes the best grid
     point. The grid is what keeps a second peak from being missed by a single
@@ -126,6 +133,7 @@ def optimize_price_one_sku(
                 X_row=X_row,
                 at_period=at_period,
                 lambda_obs=lambda_obs,
+                unit_cost=unit_cost,
             )
             for log_p in grid
         ]
@@ -147,7 +155,7 @@ def optimize_price_one_sku(
         _negative_mean_revenue,
         bounds=(win_lo, win_hi),
         method="bounded",
-        args=(model, sku_idx, X_row, at_period, lambda_obs),
+        args=(model, sku_idx, X_row, at_period, lambda_obs, unit_cost),
         options=opts,
     )
     polished = float(np.exp(res.x))
@@ -158,6 +166,7 @@ def optimize_price_one_sku(
         X_row=X_row,
         at_period=at_period,
         lambda_obs=lambda_obs,
+        unit_cost=unit_cost,
     )
     if polished_rev >= best_rev:
         return polished
@@ -216,6 +225,30 @@ def _normalize_price_bounds(
     return out
 
 
+def _normalize_unit_cost(
+    sku_levels: pd.Index,
+    objective: str,
+    unit_cost: Mapping[Any, float] | pd.Series | None,
+) -> np.ndarray:
+    if objective not in ("revenue", "margin"):
+        raise ValueError(f"objective must be 'revenue' or 'margin'; got {objective!r}")
+    costs = np.zeros(len(sku_levels), dtype=np.float64)
+    if objective == "revenue":
+        return costs
+    if unit_cost is None:
+        raise ValueError("objective='margin' requires unit_cost")
+    for i, sku in enumerate(sku_levels):
+        if sku in unit_cost:
+            costs[i] = float(unit_cost[sku])
+        elif str(sku) in unit_cost:
+            costs[i] = float(unit_cost[str(sku)])
+        else:
+            raise ValueError(f"Missing unit_cost for sku={sku!r}")
+    if (costs < 0).any() or not np.isfinite(costs).all():
+        raise ValueError("unit_cost must be finite and >= 0")
+    return costs
+
+
 def optimize_prices(
     *,
     model: "DemandModel",
@@ -225,9 +258,12 @@ def optimize_prices(
     period_effect: Any = "neutral",
     random_seed: int | None = None,
     minimize_options: dict[str, Any] | None = None,
+    objective: str = "revenue",
+    unit_cost: Mapping[Any, float] | pd.Series | None = None,
 ) -> pd.DataFrame:
     """
-    Maximize posterior mean expected revenue by choosing one regular price per SKU.
+    Maximize posterior mean expected revenue (or margin) by choosing one regular
+    price per SKU.
 
     Expected revenue on a draw is ``price * exp(mu + sigma**2 / 2)``. With
     independent per-SKU demand (no cross-price in the model), each SKU is a 1D
@@ -259,6 +295,13 @@ def optimize_prices(
         Seed for ``period_effect="draw"``.
     minimize_options
         Forwarded to the local :func:`scipy.optimize.minimize_scalar` polish.
+    objective
+        ``"revenue"`` (default) or ``"margin"``. Margin is
+        ``(price - unit_cost) * Q`` and needs ``unit_cost``. With constant
+        elasticity ``e < -1`` it has an interior optimum at
+        ``unit_cost * e / (1 + e)``, unlike revenue.
+    unit_cost
+        Mapping SKU -> unit cost. Required for ``objective="margin"``.
 
     Notes
     -----
@@ -272,6 +315,7 @@ def optimize_prices(
     pandas.DataFrame
         Columns: ``optimal_price`` (regular price, discount 0), ``mean_revenue``
         (posterior mean expected revenue at that price for that SKU),
+        ``mean_margin`` (only for ``objective="margin"``),
         ``at_bound`` (``"low"`` / ``"high"`` / ``None``, whether the optimum
         landed on the corresponding ``price_bounds`` edge rather than an
         interior price); index = SKU.
@@ -284,6 +328,7 @@ def optimize_prices(
         )
     assert model.sku_levels_ is not None
     bounds_mat = _normalize_price_bounds(model.sku_levels_, price_bounds)
+    costs = _normalize_unit_cost(model.sku_levels_, objective, unit_cost)
     X = control_matrix_for_skus(model, controls_df)
     # One future-period shock for every SKU and every price tried.
     lambda_obs = model._period_effect_draws(
@@ -304,6 +349,7 @@ def optimize_prices(
             at_period=at_period,
             lambda_obs=lambda_obs,
             options=minimize_options,
+            unit_cost=float(costs[i]),
         )
         mrev = mean_revenue_at_price(
             model=model,
@@ -323,21 +369,30 @@ def optimize_prices(
         if at_bound is not None:
             at_bound_skus[sku] = at_bound
 
-        rows.append(
-            {
-                "sku": sku,
-                "optimal_price": opt_p,
-                "mean_revenue": mrev,
-                "at_bound": at_bound,
-            }
-        )
+        row: dict[str, Any] = {
+            "sku": sku,
+            "optimal_price": opt_p,
+            "mean_revenue": mrev,
+        }
+        if objective == "margin":
+            row["mean_margin"] = mean_revenue_at_price(
+                model=model,
+                price=opt_p,
+                sku_idx=i,
+                X_row=X_row,
+                at_period=at_period,
+                lambda_obs=lambda_obs,
+                unit_cost=float(costs[i]),
+            )
+        row["at_bound"] = at_bound
+        rows.append(row)
 
     if at_bound_skus:
         msg = (
             f"{len(at_bound_skus)}/{len(model.sku_levels_)} SKU(s) optimized to a "
             f"price_bounds edge, not an interior price: {at_bound_skus}."
         )
-        if getattr(model, "model_name", None) == "log_log":
+        if getattr(model, "model_name", None) == "log_log" and objective == "revenue":
             msg += (
                 " This is expected for log_log demand: revenue is proportional to "
                 "price^(1+elasticity). Any draw with elasticity other than -1 is "
