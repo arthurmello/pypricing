@@ -1,6 +1,8 @@
 import numpy as np
 import xarray as xr
 
+from pypricing.model_components.promo_extras import ExtraFeatures, add_extra
+
 
 def add_trend(
     mu: np.ndarray,
@@ -57,6 +59,7 @@ def add_controls_and_cross(
     obs_sku_idx: np.ndarray | None = None,
     X_season: np.ndarray | None = None,
     lambda_obs: np.ndarray | None = None,
+    extra: ExtraFeatures | None = None,
 ) -> np.ndarray:
     if X_control is not None:
         beta = posterior["beta_control"].values
@@ -71,4 +74,8 @@ def add_controls_and_cross(
     mu = add_season(mu, posterior, X_season)
     if lambda_obs is not None:
         mu = mu + lambda_obs
+    if extra is not None:
+        if obs_sku_idx is None:
+            raise ValueError("obs_sku_idx is required with extra features")
+        mu = add_extra(mu, posterior, extra, obs_sku_idx)
     return mu

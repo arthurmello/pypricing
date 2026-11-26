@@ -15,6 +15,7 @@ from pypricing.model_components.sku_effects import get_sku_effect
 from pypricing.model_components.global_terms import get_sigma, get_controls_term
 from pypricing.model_components.posterior_mu import add_controls_and_cross, add_promo
 from pypricing.model_components.promo_terms import get_promo_term
+from pypricing.model_components.promo_extras import ExtraFeatures
 from pypricing.model_components.time_terms import (
     get_period_effect_term,
     get_season_term,
@@ -108,6 +109,7 @@ class QuadraticLogDemandModel(DemandModel):
             )
             if data.log_discount_index is not None:
                 mu = mu + get_promo_term(self.model_config, data)
+            mu = mu + self._extra_term(data)
             pm.Normal(
                 "log_quantity",
                 mu=mu,
@@ -129,6 +131,7 @@ class QuadraticLogDemandModel(DemandModel):
         X_season: np.ndarray | None = None,
         log_discount_index: np.ndarray | None = None,
         lambda_obs: np.ndarray | None = None,
+        extra: ExtraFeatures | None = None,
     ) -> np.ndarray:
         if self.log_price_midpoint_sku_ is None:
             raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
@@ -159,4 +162,5 @@ class QuadraticLogDemandModel(DemandModel):
             obs_sku_idx=obs_sku_idx,
             X_season=X_season,
             lambda_obs=lambda_obs,
+            extra=extra,
         )

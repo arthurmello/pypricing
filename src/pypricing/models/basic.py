@@ -41,6 +41,12 @@ from pypricing.data.price_panel import (
     skus_without_variation,
 )
 from pypricing.model_components.priors import resolve_prior
+from pypricing.model_components.promo_extras import (
+    ExtraFeatures,
+    PromoSpec,
+    build_extra_features,
+    extra_mu_term,
+)
 from pypricing.model_components.time_terms import (
     TimeEffectsKind,
     TrendKind,
@@ -171,6 +177,10 @@ class DemandModel:
         ``gamma_mundlak`` times that SKU's centered mean log regular price.
         Removes the shrinkage bias that appears when baseline demand is
         correlated with a SKU's price level. Default ``False``.
+    promo
+        Extra promo terms (:class:`PromoSpec`): curved depth response.
+        Requires ``panel_columns.discount_col``. ``None`` (default) keeps the
+        log-linear promo term only.
     endogeneity
         Correction for a price set from the demand shock. ``None`` (default)
         uses control-function IV when instrument columns are present, and no
@@ -215,6 +225,7 @@ class DemandModel:
         time_effects: TimeEffectsKind | None = None,
         mundlak: bool = False,
         endogeneity: str | None = None,
+        promo: PromoSpec | None = None,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -228,6 +239,8 @@ class DemandModel:
         self.time_effects = time_effects
         self.mundlak = bool(mundlak)
         self.endogeneity = parse_endogeneity(endogeneity)
+        self.promo = promo
+        self._fit_extra_: ExtraFeatures | None = None
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.iv_names_: tuple[str, ...] = ()
@@ -266,6 +279,7 @@ class DemandModel:
             time_effects=self.time_effects,
             mundlak=self.mundlak,
             endogeneity=self.endogeneity,
+            promo=self.promo,
             model_config=self.model_config,
             sampler_config=self.sampler_config,
         )
@@ -327,6 +341,7 @@ class DemandModel:
         X_season: np.ndarray | None = None,
         log_discount_index: np.ndarray | None = None,
         lambda_obs: np.ndarray | None = None,
+        extra: ExtraFeatures | None = None,
     ) -> np.ndarray:
         """Mean log-quantity. ``log_price`` is log regular price when discounts are used."""
         pass
@@ -359,6 +374,8 @@ class DemandModel:
             raise ValueError(
                 "time_effects='region_period' requires panel_columns.region_col"
             )
+        if self.promo is not None and self.panel_columns.discount_col is None:
+            raise ValueError("promo requires panel_columns.discount_col")
 
     @property
     def default_model_config(self) -> dict:
@@ -421,6 +438,7 @@ class DemandModel:
             "time_effects": json.dumps(self.time_effects),
             "mundlak": json.dumps(self.mundlak),
             "endogeneity": json.dumps(self.endogeneity),
+            "promo": json.dumps(None if self.promo is None else self.promo.to_json()),
         }
 
     def set_idata_attrs(
@@ -495,7 +513,11 @@ class DemandModel:
         endogeneity = (
             json.loads(attrs["endogeneity"]) if "endogeneity" in attrs else None
         )
+        promo = PromoSpec.from_json(
+            json.loads(attrs["promo"]) if "promo" in attrs else None
+        )
         return {
+            "promo": promo,
             "model_config": cls._model_config_formatting(
                 json.loads(attrs["model_config"])
             ),
@@ -742,7 +764,34 @@ class DemandModel:
         self.iv_names_ = panel.iv_names
         self.data = data.copy()
         self.endogeneity_method_ = self._resolve_endogeneity(chosen, panel.n_iv)
+        self._fit_extra_ = self._extra_features(
+            data,
+            obs_sku_idx=panel.obs_sku_idx,
+            log_discount_index=panel.log_discount_index,
+            X_control=panel.control_matrix,
+        )
         self.model = self._build_pymc_model(panel)
+
+    def _extra_features(
+        self,
+        df: pd.DataFrame,
+        *,
+        obs_sku_idx: np.ndarray,
+        log_discount_index: np.ndarray | None,
+        X_control: np.ndarray | None,
+    ) -> ExtraFeatures | None:
+        """Row-aligned features for the :class:`PromoSpec` terms, or ``None``."""
+        if self.promo is None:
+            return None
+        return build_extra_features(
+            spec=self.promo,
+            log_discount_index=log_discount_index,
+            n_obs=len(obs_sku_idx),
+        )
+
+    def _extra_term(self, data: PricePanelData) -> Any:
+        """PyMC term for the extra promo / control features, or 0."""
+        return extra_mu_term(self.model_config, data, self._fit_extra_)
 
     def _warn_unidentified_prices(self, panel: PricePanelData) -> None:
         regular = skus_without_variation(
@@ -1445,6 +1494,12 @@ class DemandModel:
             period_effect=period_effect,
             random_seed=random_seed,
         )
+        extra = self._extra_features(
+            df,
+            obs_sku_idx=obs_sku_idx,
+            log_discount_index=log_discount_index,
+            X_control=X_control,
+        )
         post = self.idata.posterior
         sigma = post["sigma"].values
         mu = self.compute_mu_from_posterior(
@@ -1457,6 +1512,7 @@ class DemandModel:
             X_season=X_season,
             log_discount_index=log_discount_index,
             lambda_obs=lambda_obs,
+            extra=extra,
         )
 
         rng = np.random.default_rng(random_seed)

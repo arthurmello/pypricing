@@ -9,6 +9,7 @@ from pypricing.data import (
     floor_censored_fraction,
 )
 from pypricing.model_components.cross_elasticity import CrossElasticitySpec
+from pypricing.model_components.promo_extras import PromoSpec
 from pypricing.models import (
     DemandModel,
     LogLogDemandModel,
@@ -32,6 +33,7 @@ __all__ = [
     "HierarchyIndex",
     "PanelColumns",
     "PricePanelData",
+    "PromoSpec",
     "LogLogDemandModel",
     "QuadraticLogDemandModel",
     "SigmoidSaturationDemandModel",
