@@ -18,6 +18,13 @@ from pypricing.models import (
     SigmoidSaturationDemandModel,
 )
 from pypricing.optimizer import optimize_prices
+from pypricing.promo import (
+    PromoConstraints,
+    compare_scenarios,
+    optimize_promotions,
+    plan_frame,
+    promo_options,
+)
 from pypricing.synthetic_data import generate_mock_data
 from pypricing.synthetic_promo import generate_promo_panel
 
@@ -34,6 +41,7 @@ __all__ = [
     "HierarchyIndex",
     "PanelColumns",
     "PricePanelData",
+    "PromoConstraints",
     "PromoSpec",
     "LogLogDemandModel",
     "QuadraticLogDemandModel",
@@ -45,4 +53,8 @@ __all__ = [
     "generate_mock_data",
     "generate_promo_panel",
     "optimize_prices",
+    "optimize_promotions",
+    "plan_frame",
+    "promo_options",
+    "compare_scenarios",
 ]
