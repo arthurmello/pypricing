@@ -180,3 +180,15 @@ def test_promo_backtest(fitted):
     assert (result.lift["predicted_lift"] > 0).mean() > 0.8
     assert result.n_train + result.n_test == len(df)
     assert model.idata is not None  # original model untouched
+
+
+def test_best_plan_is_best_on_joint_simulation(fitted):
+    from pypricing.promo import optimize_promotions
+
+    model, _ = fitted
+    frame = plan_frame(model, 2)
+    result = optimize_promotions(
+        model, frame, discounts=(0.1, 0.2, 0.3), objective="revenue", n_alternatives=3
+    )
+    c = result.comparison.drop(index="baseline")
+    assert c["mean"].idxmax() == "best"

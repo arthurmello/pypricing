@@ -741,6 +741,35 @@ def _refine_coupled(
     return choice
 
 
+def _rank_by_joint_value(
+    model: DemandModel,
+    base_frame: pd.DataFrame,
+    opts: PromoOptions,
+    plans: list[np.ndarray],
+    constraints: PromoConstraints,
+    objective: str,
+    unit_cost_col: str | None,
+) -> list[np.ndarray]:
+    """Order candidate plans by the joint simulation, feasible ones first.
+
+    The MILP ranks plans on per-unit expected values; the joint simulation
+    (same draws, all units together) is the number reported, so the plan
+    called "best" must be the best on it.
+    """
+    scored = []
+    for k, p in enumerate(plans):
+        d = _plan_value(
+            model,
+            base_frame,
+            _assignments(opts, p),
+            unit_cols=opts.unit_cols,
+            unit_cost_col=unit_cost_col,
+        )
+        feasible = _feasible_joint(d, p, opts, constraints)
+        scored.append((not feasible, -d.metric(objective).sum(axis=1).mean(), k))
+    return [plans[k] for _, _, k in sorted(scored)]
+
+
 def optimize_promotions(
     model: DemandModel,
     base_frame: pd.DataFrame,
@@ -800,6 +829,9 @@ def optimize_promotions(
         if not any((refined == p).all() for p in plans):
             plans.insert(0, refined)
 
+    plans = _rank_by_joint_value(
+        model, base_frame, opts, plans, constraints, objective, unit_cost_col
+    )
     scenarios = {
         ("best" if k == 0 else f"alternative_{k}"): _assignments(opts, p)
         for k, p in enumerate(plans)
