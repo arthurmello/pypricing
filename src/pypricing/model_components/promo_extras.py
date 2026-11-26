@@ -8,6 +8,10 @@
 - ``type_col``: one additive ``promo_type_effect`` per promo mechanic (for
   example ``"featured"`` or ``"bundle"``), shared across SKUs. Rows at regular
   price, or with a missing / ``"none"`` type, are the reference.
+- ``lags=L``: ``promo_lag[k] * z[t-k]`` for ``k = 1..L``, the same SKU's depth
+  ``k`` rows earlier (by ``period_col``, within region). A negative value is a
+  post-promo dip (pull-forward / stockpiling). Rows without history use 0, so
+  predict on frames that include the preceding periods when lags matter.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import pymc as pm
 import pytensor.tensor as pt
 import xarray as xr
 
-from pypricing.data import PricePanelData
+from pypricing.data import PanelColumns, PricePanelData
 from pypricing.model_components.priors import resolve_prior
 from pypricing.model_components.sku_effects import get_sku_effect
 
@@ -35,15 +39,20 @@ class PromoSpec:
 
     depth: DepthKind = "log_linear"
     type_col: str | None = None
+    lags: int = 0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.lags, int) or self.lags < 0:
+            raise ValueError(
+                f"PromoSpec.lags must be a non-negative int; got {self.lags!r}"
+            )
         if self.depth not in ("log_linear", "quadratic"):
             raise ValueError(
                 f"PromoSpec.depth must be 'log_linear' or 'quadratic'; got {self.depth!r}"
             )
 
     def to_json(self) -> dict[str, Any]:
-        return {"depth": self.depth, "type_col": self.type_col}
+        return {"depth": self.depth, "type_col": self.type_col, "lags": self.lags}
 
     @classmethod
     def from_json(cls, raw: dict[str, Any] | None) -> PromoSpec | None:
@@ -59,9 +68,14 @@ class ExtraFeatures:
     depth_sq: np.ndarray | None = None
     type_onehot: np.ndarray | None = None
     type_levels: tuple[str, ...] = ()
+    lag_matrix: np.ndarray | None = None
 
     def is_empty(self) -> bool:
-        return self.depth_sq is None and self.type_onehot is None
+        return (
+            self.depth_sq is None
+            and self.type_onehot is None
+            and self.lag_matrix is None
+        )
 
 
 def depth_index(log_discount_index: np.ndarray | None, n: int) -> np.ndarray:
@@ -83,6 +97,30 @@ def promo_type_values(df: pd.DataFrame, type_col: str, z: np.ndarray) -> np.ndar
     return values
 
 
+def lagged_depth(
+    df: pd.DataFrame, panel_columns: PanelColumns, z: np.ndarray, lags: int
+) -> np.ndarray:
+    """``(n_obs, lags)``: depth of the same SKU (and region) 1..lags rows earlier."""
+    period_col = panel_columns.period_col
+    if period_col not in df.columns:
+        raise ValueError(f"PromoSpec.lags requires column {period_col!r}")
+    keys = [panel_columns.sku_col]
+    if panel_columns.region_col is not None and panel_columns.region_col in df.columns:
+        keys.append(panel_columns.region_col)
+    tmp = pd.DataFrame({f"k{i}": df[k].to_numpy() for i, k in enumerate(keys)})
+    tmp["_p"] = df[period_col].to_numpy()
+    tmp["_z"] = z
+    tmp["_row"] = np.arange(len(df))
+    key_cols = [f"k{i}" for i in range(len(keys))]
+    tmp = tmp.sort_values([*key_cols, "_p"], kind="stable")
+    out = np.zeros((len(df), lags), dtype=np.float64)
+    grouped = tmp.groupby(key_cols, sort=False)["_z"]
+    rows = tmp["_row"].to_numpy()
+    for k in range(1, lags + 1):
+        out[rows, k - 1] = grouped.shift(k).fillna(0.0).to_numpy()
+    return out
+
+
 def build_extra_features(
     *,
     spec: PromoSpec | None,
@@ -90,6 +128,7 @@ def build_extra_features(
     n_obs: int,
     df: pd.DataFrame | None = None,
     type_levels: tuple[str, ...] | None = None,
+    panel_columns: PanelColumns | None = None,
 ) -> ExtraFeatures:
     """Features for ``spec``. ``type_levels=None`` learns them from ``df``."""
     feats = ExtraFeatures()
@@ -114,6 +153,10 @@ def build_extra_features(
             onehot[:, k] = values == level
         feats.type_onehot = onehot
         feats.type_levels = tuple(type_levels)
+    if spec.lags:
+        if df is None or panel_columns is None:
+            raise ValueError("lag features need the data frame and panel columns")
+        feats.lag_matrix = lagged_depth(df, panel_columns, z, spec.lags)
     return feats
 
 
@@ -148,6 +191,18 @@ def extra_mu_term(
             dims="promo_type",
         )
         term = term + pt.dot(pt.constant(feats.type_onehot), effect)
+    if feats.lag_matrix is not None:
+        pm.modelcontext(None).add_coord(
+            "lag", list(range(1, feats.lag_matrix.shape[1] + 1))
+        )
+        lag = resolve_prior(
+            model_config=model_config,
+            param_name="promo_lag",
+            default_dist=pm.Normal,
+            default_kwargs={"mu": 0.0, "sigma": 0.5},
+            dims="lag",
+        )
+        term = term + pt.dot(pt.constant(feats.lag_matrix), lag)
     return term
 
 
@@ -166,4 +221,7 @@ def add_extra(
     if feats.type_onehot is not None and "promo_type_effect" in posterior:
         effect = posterior["promo_type_effect"].values
         mu = mu + np.einsum("cdk,ok->cdo", effect, feats.type_onehot, optimize=True)
+    if feats.lag_matrix is not None and "promo_lag" in posterior:
+        lag = posterior["promo_lag"].values
+        mu = mu + np.einsum("cdk,ok->cdo", lag, feats.lag_matrix, optimize=True)
     return mu

@@ -69,3 +69,11 @@ def test_promo_type_effects(panel):
     bad["promo_type"] = "flash_sale"
     with pytest.raises(ValueError, match="Unknown promo types"):
         model.predict(bad)
+
+
+def test_post_promo_dip(panel):
+    df, truth = panel
+    model = _model(promo=PromoSpec(lags=1))
+    model.fit(df, **SAMPLE)
+    lag = float(model.idata.posterior["promo_lag"].mean())
+    assert lag < 0

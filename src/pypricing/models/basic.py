@@ -178,8 +178,8 @@ class DemandModel:
         Removes the shrinkage bias that appears when baseline demand is
         correlated with a SKU's price level. Default ``False``.
     promo
-        Extra promo terms (:class:`PromoSpec`): curved depth response and
-        promo-mechanic effects.
+        Extra promo terms (:class:`PromoSpec`): curved depth response,
+        promo-mechanic effects and post-promo lags.
         Requires ``panel_columns.discount_col``. ``None`` (default) keeps the
         log-linear promo term only.
     endogeneity
@@ -794,6 +794,7 @@ class DemandModel:
             n_obs=len(obs_sku_idx),
             df=df,
             type_levels=self.promo_type_levels_,
+            panel_columns=self.panel_columns,
         )
 
     def _extra_term(self, data: PricePanelData) -> Any:
