@@ -17,6 +17,7 @@ from pypricing.models import (
 )
 from pypricing.optimizer import optimize_prices
 from pypricing.synthetic_data import generate_mock_data
+from pypricing.synthetic_promo import generate_promo_panel
 
 try:
     __version__ = version("pypricing")
@@ -37,5 +38,6 @@ __all__ = [
     "apply_discount",
     "floor_censored_fraction",
     "generate_mock_data",
+    "generate_promo_panel",
     "optimize_prices",
 ]
