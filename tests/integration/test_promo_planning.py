@@ -157,3 +157,26 @@ def test_infeasible_plan_raises(fitted):
             discounts=(0.2,),
             constraints=PromoConstraints(min_margin_rate=0.99),
         )
+
+
+def test_promo_backtest(fitted):
+    from pypricing import promo_backtest
+
+    model, df = fitted
+    result = promo_backtest(
+        model,
+        df,
+        test_size=0.2,
+        draws=100,
+        tune=150,
+        chains=2,
+        random_seed=4,
+        progressbar=False,
+        compute_convergence_checks=False,
+    )
+    assert set(result.metrics.index) == {"overall", "promo", "regular"}
+    assert result.metrics.loc["promo", "n"] > 0
+    assert result.metrics.loc["overall", "wape"] < 0.5
+    assert (result.lift["predicted_lift"] > 0).mean() > 0.8
+    assert result.n_train + result.n_test == len(df)
+    assert model.idata is not None  # original model untouched

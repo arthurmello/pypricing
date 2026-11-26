@@ -848,3 +848,135 @@ def optimize_promotions(
         usage=usage,
         alternatives=list(scenarios.values())[1:],
     )
+
+
+# ----------------------------------------------------------------- backtest
+
+
+@dataclass
+class PromoBacktest:
+    """Out-of-sample check of a model on held-out periods.
+
+    ``metrics``: rows ``overall``, ``promo`` and ``regular`` (test rows with and
+    without a discount) with ``n``, ``wape`` (sum |error| / sum actual),
+    ``bias`` (sum predicted / sum actual - 1), ``rmse_log`` and
+    ``hdi_coverage``. ``lift``: per held-out promo row, the actual quantity, the
+    prediction, and the predicted lift over the same row at regular price.
+    ``predictions``: the test rows with predictions.
+    """
+
+    metrics: pd.DataFrame
+    lift: pd.DataFrame
+    predictions: pd.DataFrame
+    n_train: int
+    n_test: int
+
+
+def promo_backtest(
+    model: DemandModel,
+    df: pd.DataFrame,
+    *,
+    test_size: float = 0.2,
+    hdi_prob: float = 0.9,
+    random_seed: int | None = None,
+    **fit_kwargs: Any,
+) -> PromoBacktest:
+    """Fit an unfitted copy on early periods and score the held-out ones.
+
+    Predictions are made on the full frame and then restricted to the test
+    rows, so lag and within-group pressure features see the real history.
+    """
+    cols = model.panel_columns
+    work = model.clone()
+    train, test = work.train_test_split(
+        df, test_size=test_size, period_col=cols.period_col
+    )
+    if random_seed is not None:
+        fit_kwargs.setdefault("random_seed", random_seed)
+    work.fit(train, **fit_kwargs)
+
+    pred = work.predict(df, hdi_prob=hdi_prob, random_seed=random_seed)
+    is_test = df.index.isin(test.index)
+    pred = pred.loc[is_test]
+    y = pred[cols.quantity_col].to_numpy(dtype=np.float64)
+    yhat = pred["quantity_mean"].to_numpy(dtype=np.float64)
+    on_promo = (
+        pred[cols.discount_col].to_numpy(dtype=np.float64) > 0
+        if cols.discount_col is not None
+        else np.zeros(len(pred), dtype=bool)
+    )
+
+    def metrics(mask: np.ndarray) -> dict[str, float]:
+        if not mask.any():
+            return {
+                "n": 0,
+                "wape": np.nan,
+                "bias": np.nan,
+                "rmse_log": np.nan,
+                "hdi_coverage": np.nan,
+            }
+        a, p = y[mask], yhat[mask]
+        floor = cols.quantity_floor
+        lo = pred["quantity_hdi_lower"].to_numpy()[mask]
+        hi = pred["quantity_hdi_upper"].to_numpy()[mask]
+        return {
+            "n": int(mask.sum()),
+            "wape": float(np.abs(a - p).sum() / max(a.sum(), 1e-12)),
+            "bias": float(p.sum() / max(a.sum(), 1e-12) - 1),
+            "rmse_log": float(
+                np.sqrt(
+                    np.mean(
+                        (
+                            np.log(np.maximum(a, floor))
+                            - pred["log_quantity_mean"].to_numpy()[mask]
+                        )
+                        ** 2
+                    )
+                )
+            ),
+            "hdi_coverage": float(np.mean((a >= lo) & (a <= hi))),
+        }
+
+    table = pd.DataFrame(
+        {
+            "overall": metrics(np.ones(len(pred), dtype=bool)),
+            "promo": metrics(on_promo),
+            "regular": metrics(~on_promo),
+        }
+    ).T
+
+    lift = pd.DataFrame()
+    if on_promo.any() and cols.discount_col is not None:
+        full_regular = df.copy()
+        d = full_regular[cols.discount_col].to_numpy(dtype=np.float64)
+        regular_price = full_regular[cols.price_col].to_numpy(dtype=np.float64) / (
+            1 - d
+        )
+        test_promo = is_test & (d > 0)
+        full_regular.loc[test_promo, cols.discount_col] = 0.0
+        full_regular.loc[test_promo, cols.price_col] = regular_price[test_promo]
+        if work.promo is not None and work.promo.type_col is not None:
+            full_regular.loc[test_promo, work.promo.type_col] = NO_PROMO_TYPE
+        q_promo = work.expected_quantity_draws(df).reshape(-1, len(df))[:, test_promo]
+        q_reg = work.expected_quantity_draws(full_regular).reshape(-1, len(df))[
+            :, test_promo
+        ]
+        ratio = q_promo / q_reg
+        keep = [
+            c
+            for c in [
+                cols.sku_col,
+                cols.period_col,
+                cols.discount_col,
+                cols.quantity_col,
+            ]
+            if c in df.columns
+        ]
+        lift = df.loc[test_promo, keep].copy()
+        lift["predicted_quantity"] = q_promo.mean(axis=0)
+        lift["predicted_lift"] = ratio.mean(axis=0) - 1
+        lift["lift_hdi_lower"] = np.quantile(ratio, (1 - hdi_prob) / 2, axis=0) - 1
+        lift["lift_hdi_upper"] = np.quantile(ratio, 1 - (1 - hdi_prob) / 2, axis=0) - 1
+    return PromoBacktest(
+        metrics=table, lift=lift, predictions=pred, n_train=len(train), n_test=len(test)
+    )

@@ -23,6 +23,7 @@ from pypricing.promo import (
     compare_scenarios,
     optimize_promotions,
     plan_frame,
+    promo_backtest,
     promo_options,
 )
 from pypricing.synthetic_data import generate_mock_data
@@ -56,5 +57,6 @@ __all__ = [
     "optimize_promotions",
     "plan_frame",
     "promo_options",
+    "promo_backtest",
     "compare_scenarios",
 ]
