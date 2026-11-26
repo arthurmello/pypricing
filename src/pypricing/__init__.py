@@ -1,5 +1,6 @@
 from importlib.metadata import PackageNotFoundError, version
 
+from pypricing.aggregate import aggregate_panel
 from pypricing.data import (
     CrossPairIndex,
     HierarchyIndex,
@@ -48,6 +49,7 @@ __all__ = [
     "QuadraticLogDemandModel",
     "SigmoidSaturationDemandModel",
     "add_event_columns",
+    "aggregate_panel",
     "apply_discount",
     "event_indicators",
     "floor_censored_fraction",

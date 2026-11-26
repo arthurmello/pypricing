@@ -65,6 +65,9 @@ docs = [
     "furo>=2024.1.29",
     "sphinx-copybutton>=0.5",
 ]
+fast = [
+    "nutpie>=0.13",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
