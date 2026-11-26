@@ -68,6 +68,7 @@ def mean_revenue_at_price(
         X_season=X_season,
         log_discount_index=log_discount_index,
         lambda_obs=lambda_obs,
+        extra=model._extra_for_regular_price(X_row),
     )
     sigma = np.asarray(posterior["sigma"].values, dtype=np.float64).reshape(
         mu.shape[0], mu.shape[1]

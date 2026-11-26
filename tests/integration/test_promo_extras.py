@@ -77,3 +77,30 @@ def test_post_promo_dip(panel):
     model.fit(df, **SAMPLE)
     lag = float(model.idata.posterior["promo_lag"].mean())
     assert lag < 0
+
+
+def test_varying_competitor_effects(panel):
+    df, truth = panel
+    model = _model(varying_controls=("control_log_competitor_price",))
+    model.fit(df, **SAMPLE)
+    post = model.idata.posterior
+    slope = (
+        post["beta_control"].values[..., 0][..., None]
+        + post["beta_control_dev_sku"].values[..., 0]
+    )
+    by_sku = dict(zip(model.sku_levels_, slope.mean(axis=(0, 1))))
+    cat_a = np.mean([v for k, v in by_sku.items() if k.endswith("cat_A")])
+    cat_b = np.mean([v for k, v in by_sku.items() if k.endswith("cat_B")])
+    tc = truth["competitor_effect_category"]
+    assert (cat_a - cat_b) * (tc["cat_A"] - tc["cat_B"]) > 0
+    ctrl = df.groupby("sku", as_index=False)["control_log_competitor_price"].median()
+    bounds = {s: (10.0, 200.0) for s in model.sku_levels_}
+    out = model.optimize_prices(price_bounds=bounds, controls_df=ctrl)
+    assert np.isfinite(out["mean_revenue"]).all()
+
+
+def test_varying_controls_must_be_controls(panel):
+    df, _ = panel
+    model = _model(varying_controls=("not_a_control",))
+    with pytest.raises(ValueError, match="varying_controls"):
+        model.build_model(df)

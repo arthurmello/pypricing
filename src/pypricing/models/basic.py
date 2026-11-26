@@ -182,6 +182,11 @@ class DemandModel:
         promo-mechanic effects and post-promo lags.
         Requires ``panel_columns.discount_col``. ``None`` (default) keeps the
         log-linear promo term only.
+    varying_controls
+        Control columns whose slope varies by SKU: the shared ``beta_control``
+        plus a zero-mean deviation pooled through ``group_columns``
+        (``beta_control_dev_sku``). Each must be one of the model's controls.
+        Use it for competitor prices with category- or brand-specific effects.
     endogeneity
         Correction for a price set from the demand shock. ``None`` (default)
         uses control-function IV when instrument columns are present, and no
@@ -227,6 +232,7 @@ class DemandModel:
         mundlak: bool = False,
         endogeneity: str | None = None,
         promo: PromoSpec | None = None,
+        varying_controls: Sequence[str] | None = None,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -241,6 +247,10 @@ class DemandModel:
         self.mundlak = bool(mundlak)
         self.endogeneity = parse_endogeneity(endogeneity)
         self.promo = promo
+        self.varying_controls = (
+            tuple(varying_controls) if varying_controls else None
+        )
+        self.varying_control_idx_: tuple[int, ...] = ()
         self._fit_extra_: ExtraFeatures | None = None
         self.promo_type_levels_: tuple[str, ...] | None = None
         self.sku_levels_: pd.Index | None = None
@@ -282,6 +292,7 @@ class DemandModel:
             mundlak=self.mundlak,
             endogeneity=self.endogeneity,
             promo=self.promo,
+            varying_controls=self.varying_controls,
             model_config=self.model_config,
             sampler_config=self.sampler_config,
         )
@@ -441,6 +452,7 @@ class DemandModel:
             "mundlak": json.dumps(self.mundlak),
             "endogeneity": json.dumps(self.endogeneity),
             "promo": json.dumps(None if self.promo is None else self.promo.to_json()),
+            "varying_controls": json.dumps(self.varying_controls),
         }
 
     def set_idata_attrs(
@@ -518,8 +530,14 @@ class DemandModel:
         promo = PromoSpec.from_json(
             json.loads(attrs["promo"]) if "promo" in attrs else None
         )
+        varying_raw = (
+            json.loads(attrs["varying_controls"])
+            if "varying_controls" in attrs
+            else None
+        )
         return {
             "promo": promo,
+            "varying_controls": varying_raw,
             "model_config": cls._model_config_formatting(
                 json.loads(attrs["model_config"])
             ),
@@ -767,6 +785,17 @@ class DemandModel:
         self.data = data.copy()
         self.endogeneity_method_ = self._resolve_endogeneity(chosen, panel.n_iv)
         self.promo_type_levels_ = None
+        self.varying_control_idx_ = ()
+        if self.varying_controls:
+            missing = [c for c in self.varying_controls if c not in panel.control_names]
+            if missing:
+                raise ValueError(
+                    f"varying_controls {missing} are not control columns of the model "
+                    f"({list(panel.control_names)})"
+                )
+            self.varying_control_idx_ = tuple(
+                panel.control_names.index(c) for c in self.varying_controls
+            )
         self._fit_extra_ = self._extra_features(
             data,
             obs_sku_idx=panel.obs_sku_idx,
@@ -785,8 +814,8 @@ class DemandModel:
         log_discount_index: np.ndarray | None,
         X_control: np.ndarray | None,
     ) -> ExtraFeatures | None:
-        """Row-aligned features for the :class:`PromoSpec` terms, or ``None``."""
-        if self.promo is None:
+        """Row-aligned features for the extra terms, or ``None``."""
+        if self.promo is None and not self.varying_control_idx_:
             return None
         return build_extra_features(
             spec=self.promo,
@@ -795,6 +824,24 @@ class DemandModel:
             df=df,
             type_levels=self.promo_type_levels_,
             panel_columns=self.panel_columns,
+            X_control=X_control,
+            varying_idx=self.varying_control_idx_,
+            varying_names=self.varying_controls or (),
+        )
+
+    def _extra_for_regular_price(
+        self, X_control: np.ndarray | None
+    ) -> ExtraFeatures | None:
+        """Extras for rows at regular price (no promo): only varying controls."""
+        if not self.varying_control_idx_ or X_control is None:
+            return None
+        return build_extra_features(
+            spec=None,
+            log_discount_index=None,
+            n_obs=X_control.shape[0],
+            X_control=X_control,
+            varying_idx=self.varying_control_idx_,
+            varying_names=self.varying_controls or (),
         )
 
     def _extra_term(self, data: PricePanelData) -> Any:

@@ -12,6 +12,11 @@
   ``k`` rows earlier (by ``period_col``, within region). A negative value is a
   post-promo dip (pull-forward / stockpiling). Rows without history use 0, so
   predict on frames that include the preceding periods when lags matter.
+
+Separately, ``varying_controls`` on the model gives the named control columns
+a per-SKU slope: the shared ``beta_control`` plus a zero-mean deviation pooled
+through ``group_columns`` (``beta_control_dev_sku``). Use it for competitor
+prices whose effect differs by category or brand.
 """
 
 from __future__ import annotations
@@ -69,12 +74,15 @@ class ExtraFeatures:
     type_onehot: np.ndarray | None = None
     type_levels: tuple[str, ...] = ()
     lag_matrix: np.ndarray | None = None
+    varying_X: np.ndarray | None = None
+    varying_names: tuple[str, ...] = ()
 
     def is_empty(self) -> bool:
         return (
             self.depth_sq is None
             and self.type_onehot is None
             and self.lag_matrix is None
+            and self.varying_X is None
         )
 
 
@@ -129,9 +137,21 @@ def build_extra_features(
     df: pd.DataFrame | None = None,
     type_levels: tuple[str, ...] | None = None,
     panel_columns: PanelColumns | None = None,
+    X_control: np.ndarray | None = None,
+    varying_idx: tuple[int, ...] = (),
+    varying_names: tuple[str, ...] = (),
 ) -> ExtraFeatures:
-    """Features for ``spec``. ``type_levels=None`` learns them from ``df``."""
+    """Features for ``spec`` and varying controls.
+
+    ``type_levels=None`` learns promo types from ``df``. ``varying_idx`` are
+    column positions of the varying controls in ``X_control``.
+    """
     feats = ExtraFeatures()
+    if varying_idx:
+        if X_control is None:
+            raise ValueError("varying controls need the control matrix")
+        feats.varying_X = np.asarray(X_control, dtype=np.float64)[:, list(varying_idx)]
+        feats.varying_names = tuple(varying_names)
     if spec is None:
         return feats
     z = depth_index(log_discount_index, n_obs)
@@ -191,6 +211,9 @@ def extra_mu_term(
             dims="promo_type",
         )
         term = term + pt.dot(pt.constant(feats.type_onehot), effect)
+    if feats.varying_X is not None:
+        dev = _varying_slopes(model_config, data, feats.varying_names)
+        term = term + pt.sum(dev[obs_sku] * pt.constant(feats.varying_X), axis=1)
     if feats.lag_matrix is not None:
         pm.modelcontext(None).add_coord(
             "lag", list(range(1, feats.lag_matrix.shape[1] + 1))
@@ -204,6 +227,54 @@ def extra_mu_term(
         )
         term = term + pt.dot(pt.constant(feats.lag_matrix), lag)
     return term
+
+
+def _varying_slopes(
+    model_config: dict[str, Any] | None,
+    data: PricePanelData,
+    names: tuple[str, ...],
+) -> Any:
+    """``(n_skus, n_varying)`` zero-mean slope deviations, non-centered."""
+    model = pm.modelcontext(None)
+    model.add_coord("varying_control", list(names))
+    n_v = len(names)
+    lin: Any = pt.zeros((data.n_skus, n_v))
+    if data.hierarchy is not None:
+        idx_mat = np.asarray(data.hierarchy.sku_to_level_idx, dtype=np.int64)
+        for level in range(len(data.hierarchy.n_groups_per_level)):
+            sigma = resolve_prior(
+                model_config=model_config,
+                param_name=f"sigma_control_dev_group_{level}",
+                default_dist=pm.HalfNormal,
+                default_kwargs={"sigma": 0.3},
+                dims="varying_control",
+            )
+            eta = resolve_prior(
+                model_config=model_config,
+                param_name=f"eta_control_dev_group_{level}",
+                default_dist=pm.Normal,
+                default_kwargs={"mu": 0.0, "sigma": 1.0},
+                dims=(f"group_{level}", "varying_control"),
+            )
+            lin = lin + sigma[None, :] * eta[pt.constant(idx_mat[:, level])]
+    sigma_sku = resolve_prior(
+        model_config=model_config,
+        param_name="sigma_control_dev_sku",
+        default_dist=pm.HalfNormal,
+        default_kwargs={"sigma": 0.1},
+        dims="varying_control",
+    )
+    eta_sku = resolve_prior(
+        model_config=model_config,
+        param_name="eta_control_dev_sku",
+        default_dist=pm.Normal,
+        default_kwargs={"mu": 0.0, "sigma": 1.0},
+        dims=("sku", "varying_control"),
+    )
+    lin = lin + sigma_sku[None, :] * eta_sku
+    return pm.Deterministic(
+        "beta_control_dev_sku", lin, dims=("sku", "varying_control")
+    )
 
 
 def add_extra(
@@ -221,6 +292,9 @@ def add_extra(
     if feats.type_onehot is not None and "promo_type_effect" in posterior:
         effect = posterior["promo_type_effect"].values
         mu = mu + np.einsum("cdk,ok->cdo", effect, feats.type_onehot, optimize=True)
+    if feats.varying_X is not None and "beta_control_dev_sku" in posterior:
+        dev = posterior["beta_control_dev_sku"].values[:, :, obs_sku_idx, :]
+        mu = mu + np.einsum("cdov,ov->cdo", dev, feats.varying_X, optimize=True)
     if feats.lag_matrix is not None and "promo_lag" in posterior:
         lag = posterior["promo_lag"].values
         mu = mu + np.einsum("cdk,ok->cdo", lag, feats.lag_matrix, optimize=True)
