@@ -48,10 +48,18 @@ class LogLogDemandModel(DemandModel):
     def model_name(self) -> str:
         return "log_log"
 
+    def _price_center(self, obs_sku_idx: np.ndarray) -> np.ndarray | float:
+        """Per-row log-price center: the SKU's training median with ``center_price``."""
+        if not self.center_price:
+            return 0.0
+        if self.log_price_midpoint_sku_ is None:
+            raise RuntimeError("Missing log_price_midpoint_sku_; fit the model first.")
+        return np.asarray(self.log_price_midpoint_sku_, dtype=np.float64)[obs_sku_idx]
+
     def _build_pymc_model(self, data: PricePanelData) -> pm.Model:
         coords = self._pymc_coords(data)
         obs_sku = pt.constant(data.obs_sku_idx)
-        log_p = pt.constant(data.log_regular_price)
+        log_p = pt.constant(data.log_regular_price - self._price_center(data.obs_sku_idx))
 
         with pm.Model(coords=coords) as model:
             alpha_sku = get_sku_effect(
@@ -122,6 +130,7 @@ class LogLogDemandModel(DemandModel):
     ) -> np.ndarray:
         alpha = posterior["alpha_sku"].values
         elasticity = posterior["elasticity_sku"].values
+        log_price = log_price - self._price_center(obs_sku_idx)
         mu = (
             alpha[:, :, obs_sku_idx]
             + elasticity[:, :, obs_sku_idx] * log_price[None, None, :]

@@ -142,3 +142,21 @@ def test_full_promo_spec_round_trip(panel, tmp_path):
         loaded.predict(last, random_seed=1)["quantity_mean"],
         model.predict(last, random_seed=1)["quantity_mean"],
     )
+
+
+def test_center_price_same_curve(panel, tmp_path):
+    from pypricing import QuadraticLogDemandModel
+
+    df, _ = panel
+    plain = _model()
+    centered = _model(center_price=True)
+    plain.fit(df, **SAMPLE)
+    centered.fit(df, **SAMPLE)
+    a = plain.predict(df.head(6))["quantity_mean"].to_numpy()
+    b = centered.predict(df.head(6))["quantity_mean"].to_numpy()
+    np.testing.assert_allclose(a, b, rtol=0.1)
+    path = tmp_path / "c.nc"
+    centered.save(str(path))
+    assert LogLogDemandModel.load(str(path)).center_price
+    with pytest.raises(ValueError, match="center_price"):
+        QuadraticLogDemandModel(center_price=True)

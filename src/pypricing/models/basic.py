@@ -188,6 +188,11 @@ class DemandModel:
         plus a zero-mean deviation pooled through ``group_columns``
         (``beta_control_dev_sku``). Each must be one of the model's controls.
         Use it for competitor prices with category- or brand-specific effects.
+    center_price
+        Log-log only. Measure log regular price from each SKU's training
+        median, so ``alpha_sku`` is log quantity at that median price. Same
+        predictions, much better sampler geometry (``alpha`` and the
+        elasticity are no longer strongly correlated). Default ``False``.
     endogeneity
         Correction for a price set from the demand shock. ``None`` (default)
         uses control-function IV when instrument columns are present, and no
@@ -234,6 +239,7 @@ class DemandModel:
         endogeneity: str | None = None,
         promo: PromoSpec | None = None,
         varying_controls: Sequence[str] | None = None,
+        center_price: bool = False,
         model_config: dict[str, Any] | None = None,
         sampler_config: dict[str, Any] | None = None,
     ) -> None:
@@ -252,6 +258,7 @@ class DemandModel:
             tuple(varying_controls) if varying_controls else None
         )
         self.varying_control_idx_: tuple[int, ...] = ()
+        self.center_price = bool(center_price)
         self.pressure_group_codes_: np.ndarray | None = None
         self._fit_extra_: ExtraFeatures | None = None
         self.promo_type_levels_: tuple[str, ...] | None = None
@@ -295,6 +302,7 @@ class DemandModel:
             endogeneity=self.endogeneity,
             promo=self.promo,
             varying_controls=self.varying_controls,
+            center_price=self.center_price,
             model_config=self.model_config,
             sampler_config=self.sampler_config,
         )
@@ -389,6 +397,8 @@ class DemandModel:
             raise ValueError(
                 "time_effects='region_period' requires panel_columns.region_col"
             )
+        if self.center_price and self.model_name != "log_log":
+            raise ValueError("center_price applies to LogLogDemandModel only")
         if self.promo is not None and self.panel_columns.discount_col is None:
             raise ValueError("promo requires panel_columns.discount_col")
         if self.promo is not None and self.promo.pressure_level is not None:
@@ -462,6 +472,7 @@ class DemandModel:
             "endogeneity": json.dumps(self.endogeneity),
             "promo": json.dumps(None if self.promo is None else self.promo.to_json()),
             "varying_controls": json.dumps(self.varying_controls),
+            "center_price": json.dumps(self.center_price),
         }
 
     def set_idata_attrs(
@@ -544,7 +555,11 @@ class DemandModel:
             if "varying_controls" in attrs
             else None
         )
+        center_price = (
+            json.loads(attrs["center_price"]) if "center_price" in attrs else False
+        )
         return {
+            "center_price": center_price,
             "promo": promo,
             "varying_controls": varying_raw,
             "model_config": cls._model_config_formatting(
