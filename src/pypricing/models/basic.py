@@ -178,7 +178,8 @@ class DemandModel:
         Removes the shrinkage bias that appears when baseline demand is
         correlated with a SKU's price level. Default ``False``.
     promo
-        Extra promo terms (:class:`PromoSpec`): curved depth response.
+        Extra promo terms (:class:`PromoSpec`): curved depth response and
+        promo-mechanic effects.
         Requires ``panel_columns.discount_col``. ``None`` (default) keeps the
         log-linear promo term only.
     endogeneity
@@ -241,6 +242,7 @@ class DemandModel:
         self.endogeneity = parse_endogeneity(endogeneity)
         self.promo = promo
         self._fit_extra_: ExtraFeatures | None = None
+        self.promo_type_levels_: tuple[str, ...] | None = None
         self.sku_levels_: pd.Index | None = None
         self.control_names_: tuple[str, ...] = ()
         self.iv_names_: tuple[str, ...] = ()
@@ -764,12 +766,15 @@ class DemandModel:
         self.iv_names_ = panel.iv_names
         self.data = data.copy()
         self.endogeneity_method_ = self._resolve_endogeneity(chosen, panel.n_iv)
+        self.promo_type_levels_ = None
         self._fit_extra_ = self._extra_features(
             data,
             obs_sku_idx=panel.obs_sku_idx,
             log_discount_index=panel.log_discount_index,
             X_control=panel.control_matrix,
         )
+        if self._fit_extra_ is not None and self._fit_extra_.type_onehot is not None:
+            self.promo_type_levels_ = self._fit_extra_.type_levels
         self.model = self._build_pymc_model(panel)
 
     def _extra_features(
@@ -787,6 +792,8 @@ class DemandModel:
             spec=self.promo,
             log_discount_index=log_discount_index,
             n_obs=len(obs_sku_idx),
+            df=df,
+            type_levels=self.promo_type_levels_,
         )
 
     def _extra_term(self, data: PricePanelData) -> Any:

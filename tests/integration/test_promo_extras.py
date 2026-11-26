@@ -52,3 +52,20 @@ def test_quadratic_depth_finds_saturation(panel, tmp_path):
 def test_promo_requires_discount_col():
     with pytest.raises(ValueError, match="discount_col"):
         LogLogDemandModel(promo=PromoSpec(depth="quadratic"))
+
+
+def test_promo_type_effects(panel):
+    df, truth = panel
+    model = _model(promo=PromoSpec(type_col="promo_type"))
+    model.fit(df, **SAMPLE)
+    assert model.promo_type_levels_ == ("bundle", "featured", "pct_off")
+    effect = model.idata.posterior["promo_type_effect"].mean(("chain", "draw"))
+    featured = float(
+        effect.sel(promo_type="featured") - effect.sel(promo_type="pct_off")
+    )
+    assert featured > 0
+    bad = df.head(3).copy()
+    bad["discount"] = 0.2
+    bad["promo_type"] = "flash_sale"
+    with pytest.raises(ValueError, match="Unknown promo types"):
+        model.predict(bad)
