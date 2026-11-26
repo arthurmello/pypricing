@@ -100,7 +100,7 @@ def generate_promo_panel(
 
     bf = {black_friday(y) for y in range(periods[0].year, periods[-1].year + 1)}
     t = np.arange(n_weeks)
-    season = 0.12 * np.sin(2 * np.pi * (periods.dayofyear.to_numpy() / 365.25))
+    season = 0.12 * np.sin(2 * np.pi * (periods.day_of_year.to_numpy() / 365.25))
 
     cat_of = np.array([categories.index(c) for (_s, _b, c, *_r) in skus])
     for s, (sku, brand, cat, _bp, alpha, slope) in enumerate(skus):
