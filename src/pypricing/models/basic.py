@@ -124,17 +124,24 @@ def _seasonal_periods(levels: np.ndarray, values: np.ndarray) -> np.ndarray:
     index = _as_label_index(levels)
     if not isinstance(index, pd.DatetimeIndex):
         return values
-    out = np.asarray(values, dtype=object).copy()
     dates = pd.DatetimeIndex(pd.to_datetime(values))
-    known = index.get_indexer(dates) >= 0
-    for i in np.flatnonzero(~known):
+    uniq, inverse = np.unique(dates.values, return_inverse=True)
+    uniq = pd.DatetimeIndex(uniq)
+    mapped = np.asarray(uniq, dtype=object).copy()
+    unknown = index.get_indexer(uniq) < 0
+    if unknown.any():
+        order = index.sort_values()
         for back in (364, 728):
-            target = dates[i] - pd.Timedelta(days=back)
-            pos = index.get_indexer([target], method="nearest")[0]
-            if pos >= 0 and abs(index[pos] - target) <= pd.Timedelta(days=3):
-                out[i] = index[pos]
+            targets = uniq[unknown] - pd.Timedelta(days=back)
+            pos = order.get_indexer(targets, method="nearest")
+            near = order[np.clip(pos, 0, len(order) - 1)]
+            ok = (pos >= 0) & (np.abs(near - targets) <= pd.Timedelta(days=3))
+            idx = np.flatnonzero(unknown)
+            mapped[idx[ok]] = np.asarray(near[ok], dtype=object)
+            unknown[idx[ok]] = False
+            if not unknown.any():
                 break
-    return out
+    return mapped[inverse]
 
 
 def _unknown_row_groups(

@@ -468,7 +468,37 @@ class _Evaluator:
             b: self.frame.iloc[rows].reset_index(drop=True)
             for b, rows in self.block_rows.items()
         }
-        self.base = {b: self._score(b, None) for b in self.block_rows}
+        self.blocks = np.array(sorted(self.block_rows))
+        self.base = self.score_all(None)
+        # Units of each block in a fixed order, for one-unit-per-block batches.
+        self.block_units = {b: np.flatnonzero(unit_block == b) for b in self.blocks}
+        self.max_block_units = max(len(v) for v in self.block_units.values())
+
+    def score_all(
+        self, assignments: pd.DataFrame | None
+    ) -> dict[int, dict[str, np.ndarray]]:
+        """Score the whole frame once; per-block per-draw totals.
+
+        Blocks don't interact, so one pass can carry a different change in
+        every block.
+        """
+        frame = self.frame
+        if assignments is not None and len(assignments):
+            frame = apply_promos(
+                self.model, frame, assignments, unit_cols=self.decision_cols
+            )
+        d = evaluate(self.model, frame, unit_cost_col=self.unit_cost_col)
+        metrics = {
+            "quantity": d.quantity,
+            "revenue": d.revenue,
+            "discount_cost": d.discount_cost,
+        }
+        if d.margin is not None:
+            metrics["margin"] = d.margin
+        out: dict[int, dict[str, np.ndarray]] = {}
+        for b, rows in self.block_rows.items():
+            out[int(b)] = {k: v[:, rows].sum(axis=1) for k, v in metrics.items()}
+        return out
 
     def _score(self, b: int, assignments: pd.DataFrame | None) -> dict[str, np.ndarray]:
         frame = self.block_frames[b]
@@ -622,14 +652,17 @@ def promo_options(
             names.append("margin")
         n_draws = len(base_tot["quantity"])
         inc = {n: np.zeros((n_draws, n_u, n_o)) for n in names}
-        for u in range(n_u):
-            b = evaluator.unit_block[u]
+        for k in range(evaluator.max_block_units):
+            batch = np.array(
+                [v[k] for v in evaluator.block_units.values() if len(v) > k],
+                dtype=np.int64,
+            )
             for o in range(1, n_o):
-                scored = evaluator.score_block(
-                    b, assign(options.iloc[o], np.array([u]))
-                )
-                for n in names:
-                    inc[n][:, u, o] = scored[n] - evaluator.base[b][n]
+                scored = evaluator.score_all(assign(options.iloc[o], batch))
+                for u in batch:
+                    b = int(evaluator.unit_block[u])
+                    for n in names:
+                        inc[n][:, u, o] = scored[b][n] - evaluator.base[b][n]
 
     obj_key = {"units": "quantity", "revenue": "revenue", "margin": "margin"}[objective]
     if obj_key not in inc:
@@ -929,60 +962,72 @@ def _refine_coupled(
     max_rounds: int,
     period_col: str,
 ) -> np.ndarray:
-    """Coordinate ascent on the joint objective, one unit at a time.
+    """Coordinate ascent on the joint objective, one unit per block at a time.
 
-    Only the changed unit's block is re-scored, so a pass costs one block
-    evaluation per unit and option.
+    Blocks don't interact, so each pass tries an option for the k-th unit of
+    every block in a single scoring of the frame, then keeps the best change
+    per block (largest gains first, as long as every constraint still holds).
     """
     ev = opts.evaluator
     assert ev is not None
     key = {"units": "quantity", "revenue": "revenue", "margin": "margin"}[objective]
 
-    def block_means(b: int, ch: np.ndarray) -> dict[str, float]:
-        idx = ev.units_in_block(b)
-        sub = _assignments_subset(opts, ch, idx)
-        scored = ev.score_block(b, sub) if len(sub) else ev.base[b]
-        return {k: float(v.mean()) for k, v in scored.items()}
+    def means(
+        scored: Mapping[int, Mapping[str, np.ndarray]],
+    ) -> dict[int, dict[str, float]]:
+        return {
+            b: {k: float(v.mean()) for k, v in m.items()} for b, m in scored.items()
+        }
 
-    blocks = {int(b): block_means(int(b), choice) for b in np.unique(ev.unit_block)}
-    fixed = {k: 0.0 for k in next(iter(blocks.values()))}
-    for b, scores in ev.base.items():
-        if b not in blocks:
-            for k, v in scores.items():
-                fixed[k] += float(v.mean())
+    current = means(ev.score_all(_assignments(opts, choice, only_promos=True)))
 
-    def total(bl: Mapping[int, Mapping[str, float]]) -> dict[str, float]:
-        tot = dict(fixed)
-        for scores in bl.values():
-            for k, v in scores.items():
-                tot[k] += v
+    def totals(bl: Mapping[int, Mapping[str, float]]) -> dict[str, float]:
+        tot: dict[str, float] = {}
+        for m in bl.values():
+            for k, v in m.items():
+                tot[k] = tot.get(k, 0.0) + v
         return tot
 
-    best_tot = total(blocks)
+    n_o = len(opts.options)
     for _ in range(max_rounds):
         improved = False
-        for u in range(len(opts.units)):
-            b = int(ev.unit_block[u])
-            current = int(choice[u].argmax())
-            for o in np.flatnonzero(allowed[u]):
-                if o == current:
+        for k in range(ev.max_block_units):
+            batch = [int(v[k]) for v in ev.block_units.values() if len(v) > k]
+            proposals: list[tuple[float, int, int, dict[str, float]]] = []
+            for o in range(n_o):
+                trial = choice.copy()
+                moved = [u for u in batch if allowed[u, o] and not choice[u, o]]
+                if not moved:
                     continue
+                trial[moved] = False
+                trial[moved, o] = True
+                scored = means(
+                    ev.score_all(_assignments(opts, trial, only_promos=True))
+                )
+                for u in moved:
+                    b = int(ev.unit_block[u])
+                    gain = scored[b][key] - current[b][key]
+                    if gain > 1e-9:
+                        proposals.append((gain, u, o, scored[b]))
+            best_per_block: dict[int, tuple[float, int, int, dict[str, float]]] = {}
+            for prop in proposals:
+                b = int(ev.unit_block[prop[1]])
+                if b not in best_per_block or prop[0] > best_per_block[b][0]:
+                    best_per_block[b] = prop
+            for gain, u, o, block_means in sorted(
+                best_per_block.values(), key=lambda p: -p[0]
+            ):
+                b = int(ev.unit_block[u])
                 trial = choice.copy()
                 trial[u] = False
                 trial[u, o] = True
                 if not _counts_ok(trial, opts, constraints, period_col):
                     continue
-                trial_blocks = dict(blocks)
-                trial_blocks[b] = block_means(b, trial)
-                tot = total(trial_blocks)
-                if tot[key] > best_tot[key] + 1e-9 and _totals_ok(tot, constraints):
-                    choice, blocks, best_tot, current, improved = (
-                        trial,
-                        trial_blocks,
-                        tot,
-                        int(o),
-                        True,
-                    )
+                cand = dict(current)
+                cand[b] = block_means
+                if not _totals_ok(totals(cand), constraints):
+                    continue
+                choice, current, improved = trial, cand, True
         if not improved:
             break
     return choice
