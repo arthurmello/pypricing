@@ -115,6 +115,28 @@ def _one_label_code(levels: np.ndarray, label: Any) -> int:
     return code
 
 
+def _seasonal_periods(levels: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Replace periods outside training by the training period a year earlier.
+
+    Looks 364 then 728 days back (same weekday for weekly data), within three
+    days. Periods with no match are left as they are.
+    """
+    index = _as_label_index(levels)
+    if not isinstance(index, pd.DatetimeIndex):
+        return values
+    out = np.asarray(values, dtype=object).copy()
+    dates = pd.DatetimeIndex(pd.to_datetime(values))
+    known = index.get_indexer(dates) >= 0
+    for i in np.flatnonzero(~known):
+        for back in (364, 728):
+            target = dates[i] - pd.Timedelta(days=back)
+            pos = index.get_indexer([target], method="nearest")[0]
+            if pos >= 0 and abs(index[pos] - target) <= pd.Timedelta(days=3):
+                out[i] = index[pos]
+                break
+    return out
+
+
 def _unknown_row_groups(
     codes: np.ndarray, values: np.ndarray | None
 ) -> list[np.ndarray]:
@@ -169,7 +191,10 @@ class DemandModel:
         Free period effects in log-quantity. ``None`` (default) omits them.
         ``"period"`` is one zero-sum effect per period, shared by every SKU.
         ``"region_period"`` adds a zero-sum region-by-period deviation and
-        requires ``panel_columns.region_col``. Cannot be combined with
+        requires ``panel_columns.region_col``. ``"group_period"`` adds a
+        zero-sum deviation per period for each group of the first
+        ``group_columns`` level (e.g. category × week), which absorbs demand
+        shocks that promotions may be timed around. Cannot be combined with
         ``trend`` or ``seasonality`` (a free period effect absorbs both).
         Every period cell needs at least two SKUs.
     mundlak
@@ -269,6 +294,7 @@ class DemandModel:
         self.log_price_midpoint_sku_: np.ndarray | None = None
         self.sku_mean_log_price_: np.ndarray | None = None
         self.period_levels_: np.ndarray | None = None
+        self.time_group_codes_: np.ndarray | None = None
         self.region_levels_: np.ndarray | None = None
         self.data: pd.DataFrame | None = None
         self.cross_pairs_: CrossPairIndex | None = None
@@ -381,11 +407,13 @@ class DemandModel:
             cross_elasticity=self.cross_elasticity,
             group_columns=self.panel_columns.group_columns,
         )
-        if self.time_effects not in (None, "period", "region_period"):
+        if self.time_effects not in (None, "period", "region_period", "group_period"):
             raise ValueError(
-                "time_effects must be None, 'period', or 'region_period'; "
-                f"got {self.time_effects!r}"
+                "time_effects must be None, 'period', 'region_period' or "
+                f"'group_period'; got {self.time_effects!r}"
             )
+        if self.time_effects == "group_period" and not self.panel_columns.group_columns:
+            raise ValueError("time_effects='group_period' requires group_columns")
         if self.time_effects is not None and (
             self.trend is not None or self.seasonality is not None
         ):
@@ -798,6 +826,11 @@ class DemandModel:
         self.log_price_midpoint_sku_ = mid
         self.sku_mean_log_price_ = means if self.mundlak else None
         self.period_levels_ = panel.period_levels
+        self.time_group_codes_ = (
+            np.asarray(panel.hierarchy.sku_to_level_idx[:, 0], dtype=np.int64)
+            if self.time_effects == "group_period" and panel.hierarchy is not None
+            else None
+        )
         self.region_levels_ = panel.region_levels
 
         chosen = (
@@ -1466,18 +1499,25 @@ class DemandModel:
         regions: np.ndarray | None = None,
         period_effect: Any = "neutral",
         random_seed: int | None = None,
+        sku_idx: np.ndarray | None = None,
     ) -> np.ndarray | None:
         """Period-effect contribution, shape ``(chain, draw, n_obs)``.
 
         Training periods use the fitted λ. Other periods follow ``period_effect``:
         ``"neutral"`` is 0, ``"draw"`` is ``N(0, sigma_lambda)`` per posterior
-        draw and per distinct future period, and any other value reuses that
-        training period's λ.
+        draw and per distinct future period, ``"seasonal"`` reuses the λ of the
+        training period one year earlier (52 weeks, else 104; 0 when neither
+        was observed), and any other value reuses that training period's λ.
+        ``sku_idx`` (row SKU codes) is needed for ``group_period`` effects.
         """
         if self.time_effects is None:
             return None
         self._require_fitted()
         assert self.idata is not None and self.period_levels_ is not None
+        if period_effect == "seasonal":
+            if periods is not None:
+                periods = _seasonal_periods(self.period_levels_, np.asarray(periods))
+            period_effect = "neutral"
         post = self.idata.posterior
         lam = np.asarray(post["lambda_period"].values, dtype=np.float64)
         n_chain, n_draw, _n_period = lam.shape
@@ -1502,6 +1542,19 @@ class DemandModel:
             for rows in groups:
                 out[:, :, rows] = lam[:, :, code][:, :, None]
 
+        if self.time_effects == "group_period":
+            if (
+                sku_idx is not None
+                and known.any()
+                and self.time_group_codes_ is not None
+                and "lambda_group_period" in post
+            ):
+                lam_group = np.asarray(post["lambda_group_period"].values, dtype=np.float64)
+                group = self.time_group_codes_[np.asarray(sku_idx, dtype=np.int64)]
+                out[:, :, known] = out[:, :, known] + lam_group[
+                    :, :, group[known], codes[known]
+                ]
+            return out
         if self.time_effects != "region_period":
             return out
         if regions is None:
@@ -1585,6 +1638,7 @@ class DemandModel:
             regions=regions,
             period_effect=period_effect,
             random_seed=random_seed,
+            sku_idx=obs_sku_idx,
         )
         extra = self._extra_features(
             df,

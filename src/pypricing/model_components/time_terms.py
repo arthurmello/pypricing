@@ -17,7 +17,7 @@ from pypricing.model_components.hierarchical_effects import (
 from pypricing.model_components.priors import resolve_prior
 
 TrendKind = Literal["sku", "shared"]
-TimeEffectsKind = Literal["period", "region_period"]
+TimeEffectsKind = Literal["period", "region_period", "group_period"]
 SeasonComponent = Literal["yearly", "weekly"]
 PanelFrequency = Literal["D", "W", "M", "Q", "irregular"]
 _PERIOD_EFFECT_SIGMA = 0.5
@@ -135,7 +135,10 @@ def get_period_effect_term(
 
     ``kind="period"`` is one zero-sum λ per period, shared by every SKU.
     ``kind="region_period"`` adds a zero-sum region-by-period deviation on top
-    of that national effect. ``param_suffix`` (for example ``"_price"``) gives
+    of that national effect. ``kind="group_period"`` adds a zero-sum
+    deviation per period for each group of the first ``group_columns`` level
+    (e.g. category × week), absorbing demand shocks a retailer may time its
+    promotions around. ``param_suffix`` (for example ``"_price"``) gives
     the first stage its own period effects, so the control-function residual is
     price variation left after conditioning on the period.
     """
@@ -156,9 +159,29 @@ def get_period_effect_term(
     term = lam[pt.constant(data.obs_period_idx)]
     if kind == "period":
         return term
+    if kind == "group_period":
+        if data.hierarchy is None:
+            raise ValueError("time_effects='group_period' requires group_columns")
+        group_idx = np.asarray(data.hierarchy.sku_to_level_idx, dtype=np.int64)[
+            np.asarray(data.obs_sku_idx), 0
+        ]
+        sigma_group = resolve_prior(
+            model_config=model_config,
+            param_name=f"sigma_lambda_group_period{param_suffix}",
+            default_dist=pm.HalfNormal,
+            default_kwargs={"sigma": _REGION_PERIOD_EFFECT_SIGMA},
+        )
+        lam_group = pm.ZeroSumNormal(
+            f"lambda_group_period{param_suffix}",
+            sigma=sigma_group,
+            n_zerosum_axes=2,
+            dims=("group_0", "period"),
+        )
+        return term + lam_group[pt.constant(group_idx), pt.constant(data.obs_period_idx)]
     if kind != "region_period":
         raise ValueError(
-            f"time_effects must be 'period' or 'region_period'; got {kind!r}"
+            "time_effects must be 'period', 'region_period' or 'group_period'; "
+            f"got {kind!r}"
         )
     if data.obs_region_idx is None or data.region_levels is None:
         raise ValueError("time_effects='region_period' requires a region column")

@@ -184,7 +184,10 @@ def evaluate(
     Promo cost is the revenue given away on units sold: ``Q * regular * d``.
     """
     cols = model.panel_columns
-    q = model.expected_quantity_draws(frame)
+    # Future periods have no fitted period effect: reuse last year's, so
+    # seasonality and events still shape the plan.
+    period_effect = "seasonal" if model.time_effects is not None else "neutral"
+    q = model.expected_quantity_draws(frame, period_effect=period_effect)
     q = q.reshape(-1, q.shape[-1])
     price = frame[cols.price_col].to_numpy(dtype=np.float64)
     d = (

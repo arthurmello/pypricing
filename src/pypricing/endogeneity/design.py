@@ -62,6 +62,16 @@ def exogenous_design(model: DemandModel) -> np.ndarray:
                 + data[model.period_col].astype(str)
             )
             parts.append(pd.get_dummies(cell).to_numpy(dtype=np.float64))
+        elif model.time_effects == "group_period" and model.time_group_codes_ is not None:
+            sku_idx = pd.Categorical(
+                data[model.sku_col], categories=model.sku_levels_
+            ).codes
+            cell = (
+                pd.Series(model.time_group_codes_[sku_idx]).astype(str).to_numpy()
+                + "|"
+                + data[model.period_col].astype(str).to_numpy()
+            )
+            parts.append(pd.get_dummies(cell).to_numpy(dtype=np.float64))
         else:
             period = pd.Categorical(data[model.period_col])
             parts.append(pd.get_dummies(period).to_numpy(dtype=np.float64))
