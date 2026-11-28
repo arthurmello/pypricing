@@ -242,8 +242,10 @@ def apply_promos(
     )
     type_col = model.promo.type_col if model.promo is not None else None
     on = list(unit_cols)
-    if cols.period_col in assignments.columns:
+    if cols.period_col in assignments.columns and cols.period_col not in on:
         on.append(cols.period_col)
+    if assignments.empty:
+        return frame.copy()
     lookup = assignments.set_index(on)
     if not lookup.index.is_unique:
         raise ValueError("assignments must have one row per unit (and period)")
@@ -350,11 +352,16 @@ def compare_scenarios(
 # ---------------------------------------------------------------- options
 
 
-def _units(frame: pd.DataFrame, unit_cols: Sequence[str]) -> pd.DataFrame:
+def _units(
+    frame: pd.DataFrame, unit_cols: Sequence[str], *, window_only: bool = False
+) -> pd.DataFrame:
     missing = [c for c in unit_cols if c not in frame.columns]
     if missing:
         raise ValueError(f"plan frame missing unit columns {missing}")
-    return frame[list(unit_cols)].drop_duplicates().reset_index(drop=True)
+    rows = frame
+    if window_only and WINDOW_COL in frame.columns:
+        rows = frame[frame[WINDOW_COL].to_numpy(dtype=bool)]
+    return rows[list(unit_cols)].drop_duplicates().reset_index(drop=True)
 
 
 def _option_grid(
@@ -379,8 +386,13 @@ def _row_unit_codes(
 
 
 def _is_coupled(model: DemandModel) -> bool:
+    """Do units interact (within-group pressure or cross-price terms)?"""
     pressure = model.promo is not None and model.promo.pressure_level is not None
     return pressure or model.cross_elasticity is not None
+
+
+def _has_lags(model: DemandModel) -> bool:
+    return model.promo is not None and model.promo.lags > 0
 
 
 def _observed_max_discount(
@@ -399,16 +411,105 @@ def _observed_max_discount(
     return seen.reindex(key).fillna(0.0).to_numpy(dtype=np.float64)
 
 
+class _Evaluator:
+    """Evaluate assignments on the smallest block of rows they can affect.
+
+    Rows are split into independent blocks: with within-group pressure, a block
+    is a pressure group (e.g. a category, all periods); otherwise a unit's own
+    rows (all periods, so post-promo lags stay inside). With cross-price terms
+    everything is one block. Changing one unit only needs its block re-scored.
+    """
+
+    METRICS = ("quantity", "revenue", "discount_cost", "margin")
+
+    def __init__(
+        self,
+        model: DemandModel,
+        frame: pd.DataFrame,
+        units: pd.DataFrame,
+        decision_cols: Sequence[str],
+        level_cols: Sequence[str],
+        unit_cost_col: str | None,
+    ) -> None:
+        self.model = model
+        self.frame = frame.reset_index(drop=True)
+        self.units = units
+        self.decision_cols = list(decision_cols)
+        self.unit_cost_col = unit_cost_col
+        n = len(self.frame)
+        if model.cross_elasticity is not None:
+            block = np.zeros(n, dtype=np.int64)
+        else:
+            keys = list(level_cols)
+            if model.promo is not None and model.promo.pressure_level is not None:
+                groups = model.panel_columns.group_columns or ()
+                gcol = groups[model.promo.pressure_level]
+                if gcol not in self.frame.columns:
+                    raise ValueError(
+                        f"plan frame needs the pressure group column {gcol!r}"
+                    )
+                keys = [gcol]
+            block = (
+                self.frame.groupby(keys, sort=False, dropna=False).ngroup().to_numpy()
+            )
+        unit_rows = _row_unit_codes(self.frame, units, decision_cols)
+        unit_block = np.full(len(units), -1, dtype=np.int64)
+        for u in range(len(units)):
+            b = np.unique(block[unit_rows == u])
+            if len(b) != 1:
+                block[:] = 0  # a unit spans blocks: fall back to one block
+                unit_block[:] = 0
+                break
+            unit_block[u] = b[0]
+        self.block = block
+        self.unit_block = unit_block
+        self.block_rows = {b: np.flatnonzero(block == b) for b in np.unique(block)}
+        self.block_frames = {
+            b: self.frame.iloc[rows].reset_index(drop=True)
+            for b, rows in self.block_rows.items()
+        }
+        self.base = {b: self._score(b, None) for b in self.block_rows}
+
+    def _score(self, b: int, assignments: pd.DataFrame | None) -> dict[str, np.ndarray]:
+        frame = self.block_frames[b]
+        if assignments is not None and len(assignments):
+            frame = apply_promos(
+                self.model, frame, assignments, unit_cols=self.decision_cols
+            )
+        d = evaluate(self.model, frame, unit_cost_col=self.unit_cost_col)
+        out = {
+            "quantity": d.quantity.sum(axis=1),
+            "revenue": d.revenue.sum(axis=1),
+            "discount_cost": d.discount_cost.sum(axis=1),
+        }
+        if d.margin is not None:
+            out["margin"] = d.margin.sum(axis=1)
+        return out
+
+    def units_in_block(self, b: int) -> np.ndarray:
+        return np.flatnonzero(self.unit_block == b)
+
+    def score_block(self, b: int, assignments: pd.DataFrame) -> dict[str, np.ndarray]:
+        return self._score(b, assignments)
+
+    def baseline_totals(self) -> dict[str, np.ndarray]:
+        tot: dict[str, np.ndarray] = {}
+        for scores in self.base.values():
+            for k, v in scores.items():
+                tot[k] = tot.get(k, 0) + v
+        return tot
+
+
 @dataclass
 class PromoOptions:
     """Every unit x option, with incremental outcomes vs no promo for that unit.
 
-    ``table`` columns: unit columns, ``discount``, ``promo_type``,
-    ``incremental_{objective}`` mean / HDI, ``prob_positive``,
-    ``incremental_units``, ``incremental_revenue``, ``incremental_margin``,
-    ``promo_cost`` (means) and ``extrapolated`` (deeper than any discount the
-    unit had in the training data). ``draws[objective]`` is
-    ``(n_draws, n_units, n_options)``.
+    ``table`` columns: unit columns (plus the period with ``timing=True``),
+    ``discount``, ``promo_type``, ``incremental_{objective}`` mean / HDI,
+    ``prob_positive``, ``incremental_units``, ``incremental_revenue``,
+    ``incremental_margin``, ``promo_cost`` (means) and ``extrapolated``
+    (deeper than any discount the unit had in the training data).
+    ``draws[objective]`` is ``(n_draws, n_units, n_options)``.
     """
 
     table: pd.DataFrame
@@ -417,6 +518,9 @@ class PromoOptions:
     draws: dict[str, np.ndarray] = field(repr=False)
     baseline: dict[str, float] = field(default_factory=dict)
     unit_cols: tuple[str, ...] = ()
+    level_cols: tuple[str, ...] = ()
+    timing: bool = False
+    evaluator: _Evaluator | None = field(default=None, repr=False)
 
 
 def default_promo_type(model: DemandModel) -> str | None:
@@ -448,38 +552,36 @@ def promo_options(
     objective: str = "margin",
     unit_cost_col: str | None = "unit_cost",
     hdi_prob: float = 0.9,
+    timing: bool = False,
 ) -> PromoOptions:
     """Incremental outcome of each option for each unit, all else at regular price.
 
     ``promo_types=None`` on a model with promo types uses only the most common
     one (:func:`default_promo_type`), so only the depth is chosen.
 
-    Without coupling terms each option is evaluated for all units in one pass.
-    With within-group pressure or cross-price terms each unit is evaluated on
-    its own, so the numbers are the unit's marginal effect (its own lift minus
-    what it takes from the others).
+    ``timing=False``: one decision per unit for the whole promo window.
+    ``timing=True``: one decision per unit *and* window period, so the plan
+    also says when to run each promo.
+
+    Without coupling terms (and, with timing, without lags) each option is
+    scored for all units in one pass. Otherwise each unit is scored on its own,
+    on the block of rows it can affect, so the numbers are its marginal effect
+    (own lift minus what it takes from the others and from its later weeks).
     """
     _check_objective(objective)
     cols = model.panel_columns
-    unit_cols = tuple(unit_cols or (cols.sku_col,))
+    level_cols = tuple(unit_cols or (cols.sku_col,))
+    decision_cols = level_cols + ((cols.period_col,) if timing else ())
     type_col = model.promo.type_col if model.promo is not None else None
     if promo_types is not None and type_col is None:
         raise ValueError("promo_types needs a model fit with PromoSpec.type_col")
     if type_col is not None and promo_types is None:
         plain = default_promo_type(model)
         promo_types = [plain] if plain is not None else None
-    units = _units(base_frame, unit_cols)
+    frame = base_frame.reset_index(drop=True)
+    units = _units(frame, decision_cols, window_only=timing)
     options = _option_grid(discounts, promo_types)
     n_u, n_o = len(units), len(options)
-    row_unit = _row_unit_codes(base_frame, units, unit_cols)
-
-    base = evaluate(model, base_frame, unit_cost_col=unit_cost_col)
-    names = ["quantity", "revenue", "discount_cost"] + (
-        ["margin"] if base.margin is not None else []
-    )
-    base_tot = {n: getattr(base, n).sum(axis=1) for n in names}
-    n_draws = base.quantity.shape[0]
-    inc = {n: np.zeros((n_draws, n_u, n_o)) for n in names}
 
     def assign(option: pd.Series, which: np.ndarray) -> pd.DataFrame:
         a = units.iloc[which].copy()
@@ -488,55 +590,73 @@ def promo_options(
             a["promo_type"] = option["promo_type"]
         return a
 
-    for o in range(1, n_o):
-        option = options.iloc[o]
-        if not _is_coupled(model):
-            frame = apply_promos(
-                model, base_frame, assign(option, np.arange(n_u)), unit_cols=unit_cols
+    names = ["quantity", "revenue", "discount_cost"]
+    fast = not _is_coupled(model) and not (timing and _has_lags(model))
+    evaluator = None
+    if fast:
+        base = evaluate(model, frame, unit_cost_col=unit_cost_col)
+        if base.margin is not None:
+            names.append("margin")
+        base_tot = {n: getattr(base, n).sum(axis=1) for n in names}
+        n_draws = base.quantity.shape[0]
+        inc = {n: np.zeros((n_draws, n_u, n_o)) for n in names}
+        row_unit = _row_unit_codes(frame, units, decision_cols)
+        for o in range(1, n_o):
+            promo = apply_promos(
+                model,
+                frame,
+                assign(options.iloc[o], np.arange(n_u)),
+                unit_cols=decision_cols,
             )
-            d = evaluate(model, frame, unit_cost_col=unit_cost_col)
+            d = evaluate(model, promo, unit_cost_col=unit_cost_col)
             for n in names:
                 delta = getattr(d, n) - getattr(base, n)
                 for u in range(n_u):
                     inc[n][:, u, o] = delta[:, row_unit == u].sum(axis=1)
-            continue
+    else:
+        evaluator = _Evaluator(
+            model, frame, units, decision_cols, level_cols, unit_cost_col
+        )
+        base_tot = evaluator.baseline_totals()
+        if "margin" in base_tot:
+            names.append("margin")
+        n_draws = len(base_tot["quantity"])
+        inc = {n: np.zeros((n_draws, n_u, n_o)) for n in names}
         for u in range(n_u):
-            frame = apply_promos(
-                model, base_frame, assign(option, np.array([u])), unit_cols=unit_cols
-            )
-            d = evaluate(model, frame, unit_cost_col=unit_cost_col)
-            for n in names:
-                inc[n][:, u, o] = getattr(d, n).sum(axis=1) - base_tot[n]
+            b = evaluator.unit_block[u]
+            for o in range(1, n_o):
+                scored = evaluator.score_block(
+                    b, assign(options.iloc[o], np.array([u]))
+                )
+                for n in names:
+                    inc[n][:, u, o] = scored[n] - evaluator.base[b][n]
 
     obj_key = {"units": "quantity", "revenue": "revenue", "margin": "margin"}[objective]
     if obj_key not in inc:
         raise ValueError("objective='margin' needs a unit cost column")
-    seen_max = _observed_max_discount(model, units, unit_cols)
-    rows = []
-    for u in range(n_u):
-        for o in range(n_o):
-            x = inc[obj_key][:, u, o]
-            lo, hi = _hdi(x, hdi_prob)
-            row = {c: units.iloc[u][c] for c in unit_cols}
-            disc = float(options.iloc[o]["discount"])
-            row.update(
-                {
-                    "discount": disc,
-                    "promo_type": options.iloc[o]["promo_type"],
-                    f"incremental_{objective}": float(x.mean()),
-                    "hdi_lower": lo,
-                    "hdi_upper": hi,
-                    "prob_positive": float(np.mean(x > 0)) if o else np.nan,
-                    "incremental_units": float(inc["quantity"][:, u, o].mean()),
-                    "incremental_revenue": float(inc["revenue"][:, u, o].mean()),
-                    "incremental_margin": float(inc["margin"][:, u, o].mean())
-                    if "margin" in inc
-                    else np.nan,
-                    "promo_cost": float(inc["discount_cost"][:, u, o].mean()),
-                    "extrapolated": bool(disc > seen_max[u] + 1e-9),
-                }
-            )
-            rows.append(row)
+    seen_max = _observed_max_discount(model, units, level_cols)
+    obj = inc[obj_key]
+    lo = np.quantile(obj, (1 - hdi_prob) / 2, axis=0)
+    hi = np.quantile(obj, 1 - (1 - hdi_prob) / 2, axis=0)
+    mean = {n: v.mean(axis=0) for n, v in inc.items()}
+    ppos = (obj > 0).mean(axis=0)
+    table = pd.DataFrame(
+        {c: np.repeat(units[c].to_numpy(), n_o) for c in decision_cols}
+    )
+    disc = np.tile(options["discount"].to_numpy(dtype=np.float64), n_u)
+    table["discount"] = disc
+    table["promo_type"] = np.tile(options["promo_type"].to_numpy(dtype=object), n_u)
+    table[f"incremental_{objective}"] = mean[obj_key].ravel()
+    table["hdi_lower"] = lo.ravel()
+    table["hdi_upper"] = hi.ravel()
+    pp = ppos.copy()
+    pp[:, 0] = np.nan
+    table["prob_positive"] = pp.ravel()
+    table["incremental_units"] = mean["quantity"].ravel()
+    table["incremental_revenue"] = mean["revenue"].ravel()
+    table["incremental_margin"] = mean["margin"].ravel() if "margin" in mean else np.nan
+    table["promo_cost"] = mean["discount_cost"].ravel()
+    table["extrapolated"] = disc > np.repeat(seen_max, n_o) + 1e-9
     draws = {objective: inc[obj_key]}
     for n, key in (
         ("units", "quantity"),
@@ -546,14 +666,17 @@ def promo_options(
     ):
         if key in inc:
             draws[n] = inc[key]
-    baseline = {n: float(v.mean()) for n, v in base_tot.items()}
+    baseline = {n: float(np.mean(v)) for n, v in base_tot.items()}
     return PromoOptions(
-        table=pd.DataFrame(rows),
+        table=table,
         units=units,
         options=options,
         draws=draws,
         baseline=baseline,
-        unit_cols=unit_cols,
+        unit_cols=decision_cols,
+        level_cols=level_cols,
+        timing=timing,
+        evaluator=evaluator,
     )
 
 
@@ -567,10 +690,11 @@ class PromoConstraints:
     budget
         Maximum expected promo cost (revenue given away, ``Q * regular * d``).
     max_promos
-        Maximum number of units on promo.
+        Maximum number of promos (units on promo; with timing, promo-periods).
     max_promos_per
-        Column name -> max units on promo per value of that column (e.g.
-        ``{"category": 1}``). The column must be one of the unit columns.
+        Column name -> max promos per value of that column (e.g.
+        ``{"category": 1}``, or with timing ``{"period": 3}``). The column must
+        be one of the unit columns (or the period column with timing).
     max_discount
         Deepest allowed discount, overall (float) or per unit-column value
         (``{"column": {value: max}}``).
@@ -578,6 +702,11 @@ class PromoConstraints:
         Minimum total margin / revenue for the plan horizon.
     exclude_extrapolated
         Drop options deeper than any discount the unit had in the training data.
+    max_promos_per_unit
+        Timing only: most promo periods per unit in the window.
+    min_gap
+        Timing only: at least this many regular-price periods between two
+        promos of the same unit.
     """
 
     budget: float | None = None
@@ -586,17 +715,19 @@ class PromoConstraints:
     max_discount: float | Mapping[str, Mapping[Any, float]] | None = None
     min_margin_rate: float | None = None
     exclude_extrapolated: bool = False
+    max_promos_per_unit: int | None = None
+    min_gap: int | None = None
 
 
 @dataclass
 class PromoPlan:
     """Result of :func:`optimize_promotions`.
 
-    ``plan``: one row per unit with the chosen option and its expected
-    incremental outcomes. ``comparison``: the best plan, the runner-up plans and
-    the baseline compared on the same draws (``prob_best``,
-    ``prob_beats_baseline``). ``options``: the full unit x option table.
-    ``usage``: how much of each constraint the plan uses.
+    ``plan``: one row per unit (with timing: per unit and period) with the
+    chosen option and its expected incremental outcomes. ``comparison``: the
+    best plan, the runner-up plans and the baseline compared on the same draws
+    (``prob_best``, ``prob_beats_baseline``). ``options``: the full unit x
+    option table. ``usage``: how much of each constraint the plan uses.
     """
 
     plan: pd.DataFrame
@@ -628,75 +759,124 @@ def _allowed(opts: PromoOptions, constraints: PromoConstraints) -> np.ndarray:
     return allowed
 
 
+def _level_groups(opts: PromoOptions) -> np.ndarray:
+    """Code of each decision unit's level unit (unit without the period)."""
+    return opts.units.groupby(list(opts.level_cols), sort=False).ngroup().to_numpy()
+
+
+def _period_order(opts: PromoOptions, period_col: str) -> np.ndarray:
+    periods = pd.Series(opts.units[period_col])
+    return periods.rank(method="dense").astype(int).to_numpy() - 1
+
+
+def _count_rows(
+    opts: PromoOptions, constraints: PromoConstraints, period_col: str
+) -> list[tuple[np.ndarray, float]]:
+    """(mask over units, cap) for every promo-count constraint."""
+    rows: list[tuple[np.ndarray, float]] = []
+    n_u = len(opts.units)
+    if constraints.max_promos is not None:
+        rows.append((np.ones(n_u, dtype=bool), float(constraints.max_promos)))
+    for col, cap in (constraints.max_promos_per or {}).items():
+        if col not in opts.unit_cols:
+            raise ValueError(f"max_promos_per column {col!r} is not a unit column")
+        for val in opts.units[col].unique():
+            rows.append(((opts.units[col] == val).to_numpy(), float(cap)))
+    if (
+        constraints.max_promos_per_unit is not None or constraints.min_gap
+    ) and not opts.timing:
+        raise ValueError("max_promos_per_unit and min_gap need timing=True")
+    if opts.timing:
+        level = _level_groups(opts)
+        order = _period_order(opts, period_col)
+        if constraints.max_promos_per_unit is not None:
+            for g in np.unique(level):
+                rows.append((level == g, float(constraints.max_promos_per_unit)))
+        gap = int(constraints.min_gap or 0)
+        if gap > 0:
+            for g in np.unique(level):
+                in_g = level == g
+                for start in range(order.max() + 1):
+                    window = in_g & (order >= start) & (order <= start + gap)
+                    if window.sum() > 1:
+                        rows.append((window, 1.0))
+    return rows
+
+
 def _solve_milp(
     value: np.ndarray,
     opts: PromoOptions,
     constraints: PromoConstraints,
     allowed: np.ndarray,
     exclude: list[np.ndarray],
+    period_col: str,
 ) -> np.ndarray | None:
     from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import lil_matrix
 
     n_u, n_o = value.shape
     n = n_u * n_o
-    A, lo, hi = [], [], []
+    count_rows = _count_rows(opts, constraints, period_col)
+    n_rows = n_u + len(count_rows) + len(exclude) + 2
+    A = lil_matrix((n_rows, n))
+    lo, hi = [], []
+    r = 0
     for u in range(n_u):
-        row = np.zeros(n)
-        row[u * n_o : (u + 1) * n_o] = 1
-        A.append(row)
+        A[r, u * n_o : (u + 1) * n_o] = 1
         lo.append(1)
         hi.append(1)
-    promo = np.tile(np.r_[0.0, np.ones(n_o - 1)], n_u)
+        r += 1
+    for mask, cap in count_rows:
+        for u in np.flatnonzero(mask):
+            A[r, u * n_o + 1 : (u + 1) * n_o] = 1
+        lo.append(-np.inf)
+        hi.append(cap)
+        r += 1
     if constraints.budget is not None:
-        A.append(opts.draws["promo_cost"].mean(axis=0).ravel())
+        A[r, :] = opts.draws["promo_cost"].mean(axis=0).ravel()
         lo.append(-np.inf)
         hi.append(float(constraints.budget))
-    if constraints.max_promos is not None:
-        A.append(promo)
-        lo.append(-np.inf)
-        hi.append(float(constraints.max_promos))
-    for col, cap in (constraints.max_promos_per or {}).items():
-        if col not in opts.unit_cols:
-            raise ValueError(f"max_promos_per column {col!r} is not a unit column")
-        for val in opts.units[col].unique():
-            mask = np.repeat((opts.units[col] == val).to_numpy(), n_o)
-            A.append(promo * mask)
-            lo.append(-np.inf)
-            hi.append(float(cap))
+        r += 1
     if constraints.min_margin_rate is not None:
         if "margin" not in opts.draws:
             raise ValueError("min_margin_rate needs a unit cost column")
-        r = float(constraints.min_margin_rate)
+        rate = float(constraints.min_margin_rate)
         coef = (
-            opts.draws["margin"].mean(axis=0) - r * opts.draws["revenue"].mean(axis=0)
+            opts.draws["margin"].mean(axis=0)
+            - rate * opts.draws["revenue"].mean(axis=0)
         ).ravel()
-        A.append(coef)
-        lo.append(r * opts.baseline["revenue"] - opts.baseline["margin"])
+        A[r, :] = coef
+        lo.append(rate * opts.baseline["revenue"] - opts.baseline["margin"])
         hi.append(np.inf)
+        r += 1
     for chosen in exclude:
-        A.append(chosen.ravel().astype(float))
+        A[r, :] = chosen.ravel().astype(float)
         lo.append(-np.inf)
         hi.append(n_u - 1)
-    ub = allowed.ravel().astype(float)
+        r += 1
+    A = A[:r].tocsr()
     res = milp(
         c=-value.ravel(),
-        constraints=LinearConstraint(np.array(A), lo, hi),
+        constraints=LinearConstraint(A, lo, hi),
         integrality=np.ones(n),
-        bounds=Bounds(np.zeros(n), ub),
+        bounds=Bounds(np.zeros(n), allowed.ravel().astype(float)),
+        options={"time_limit": 60},
     )
     if res.x is None:
         return None
     return np.round(res.x).reshape(n_u, n_o).astype(bool)
 
 
-def _assignments(opts: PromoOptions, choice: np.ndarray) -> pd.DataFrame:
-    rows = []
-    for u, o in enumerate(choice.argmax(axis=1)):
-        row = {c: opts.units.iloc[u][c] for c in opts.unit_cols}
-        row["discount"] = float(opts.options.iloc[o]["discount"])
-        row["promo_type"] = opts.options.iloc[o]["promo_type"]
-        rows.append(row)
-    return pd.DataFrame(rows)
+def _assignments(
+    opts: PromoOptions, choice: np.ndarray, *, only_promos: bool = False
+) -> pd.DataFrame:
+    picked = choice.argmax(axis=1)
+    out = opts.units.copy()
+    out["discount"] = opts.options["discount"].to_numpy(dtype=np.float64)[picked]
+    out["promo_type"] = opts.options["promo_type"].to_numpy(dtype=object)[picked]
+    if only_promos:
+        out = out[out["discount"] > 0]
+    return out.reset_index(drop=True)
 
 
 def _plan_value(
@@ -711,44 +891,78 @@ def _plan_value(
     return evaluate(model, frame, unit_cost_col=unit_cost_col)
 
 
-def _feasible_joint(
-    d: Draws, choice: np.ndarray, opts: PromoOptions, c: PromoConstraints
+def _counts_ok(
+    choice: np.ndarray, opts: PromoOptions, c: PromoConstraints, period_col: str
 ) -> bool:
-    if c.budget is not None and d.discount_cost.sum(axis=1).mean() > c.budget + 1e-9:
-        return False
-    if c.min_margin_rate is not None and d.margin is not None:
-        if (
-            d.margin.sum(axis=1).mean()
-            < c.min_margin_rate * d.revenue.sum(axis=1).mean() - 1e-9
-        ):
-            return False
     on = choice[:, 1:].any(axis=1)
-    if c.max_promos is not None and on.sum() > c.max_promos:
+    return all(
+        on[mask].sum() <= cap + 1e-9 for mask, cap in _count_rows(opts, c, period_col)
+    )
+
+
+def _totals_ok(tot: Mapping[str, float], c: PromoConstraints) -> bool:
+    if c.budget is not None and tot["discount_cost"] > c.budget + 1e-9:
         return False
-    for col, cap in (c.max_promos_per or {}).items():
-        if (pd.Series(on).groupby(opts.units[col].to_numpy()).sum() > cap).any():
+    if c.min_margin_rate is not None and "margin" in tot:
+        if tot["margin"] < c.min_margin_rate * tot["revenue"] - 1e-9:
             return False
     return True
 
 
+def _draw_totals(d: Draws) -> dict[str, float]:
+    out = {
+        "quantity": float(d.quantity.sum(axis=1).mean()),
+        "revenue": float(d.revenue.sum(axis=1).mean()),
+        "discount_cost": float(d.discount_cost.sum(axis=1).mean()),
+    }
+    if d.margin is not None:
+        out["margin"] = float(d.margin.sum(axis=1).mean())
+    return out
+
+
 def _refine_coupled(
-    model: DemandModel,
-    base_frame: pd.DataFrame,
     opts: PromoOptions,
     choice: np.ndarray,
     allowed: np.ndarray,
     constraints: PromoConstraints,
     objective: str,
-    unit_cost_col: str | None,
     max_rounds: int,
+    period_col: str,
 ) -> np.ndarray:
-    """Coordinate ascent on the joint objective, one unit at a time."""
-    kw = dict(unit_cols=opts.unit_cols, unit_cost_col=unit_cost_col)
-    best = _plan_value(model, base_frame, _assignments(opts, choice), **kw)
-    best_val = best.metric(objective).sum(axis=1).mean()
+    """Coordinate ascent on the joint objective, one unit at a time.
+
+    Only the changed unit's block is re-scored, so a pass costs one block
+    evaluation per unit and option.
+    """
+    ev = opts.evaluator
+    assert ev is not None
+    key = {"units": "quantity", "revenue": "revenue", "margin": "margin"}[objective]
+
+    def block_means(b: int, ch: np.ndarray) -> dict[str, float]:
+        idx = ev.units_in_block(b)
+        sub = _assignments_subset(opts, ch, idx)
+        scored = ev.score_block(b, sub) if len(sub) else ev.base[b]
+        return {k: float(v.mean()) for k, v in scored.items()}
+
+    blocks = {int(b): block_means(int(b), choice) for b in np.unique(ev.unit_block)}
+    fixed = {k: 0.0 for k in next(iter(blocks.values()))}
+    for b, scores in ev.base.items():
+        if b not in blocks:
+            for k, v in scores.items():
+                fixed[k] += float(v.mean())
+
+    def total(bl: Mapping[int, Mapping[str, float]]) -> dict[str, float]:
+        tot = dict(fixed)
+        for scores in bl.values():
+            for k, v in scores.items():
+                tot[k] += v
+        return tot
+
+    best_tot = total(blocks)
     for _ in range(max_rounds):
         improved = False
         for u in range(len(opts.units)):
+            b = int(ev.unit_block[u])
             current = int(choice[u].argmax())
             for o in np.flatnonzero(allowed[u]):
                 if o == current:
@@ -756,15 +970,30 @@ def _refine_coupled(
                 trial = choice.copy()
                 trial[u] = False
                 trial[u, o] = True
-                d = _plan_value(model, base_frame, _assignments(opts, trial), **kw)
-                val = d.metric(objective).sum(axis=1).mean()
-                if val > best_val + 1e-9 and _feasible_joint(
-                    d, trial, opts, constraints
-                ):
-                    choice, best_val, current, improved = trial, val, int(o), True
+                if not _counts_ok(trial, opts, constraints, period_col):
+                    continue
+                trial_blocks = dict(blocks)
+                trial_blocks[b] = block_means(b, trial)
+                tot = total(trial_blocks)
+                if tot[key] > best_tot[key] + 1e-9 and _totals_ok(tot, constraints):
+                    choice, blocks, best_tot, current, improved = (
+                        trial,
+                        trial_blocks,
+                        tot,
+                        int(o),
+                        True,
+                    )
         if not improved:
             break
     return choice
+
+
+def _assignments_subset(
+    opts: PromoOptions, choice: np.ndarray, idx: np.ndarray
+) -> pd.DataFrame:
+    a = _assignments(opts, choice)
+    a = a.iloc[idx]
+    return a[a["discount"] > 0].reset_index(drop=True)
 
 
 def _rank_by_joint_value(
@@ -775,6 +1004,7 @@ def _rank_by_joint_value(
     constraints: PromoConstraints,
     objective: str,
     unit_cost_col: str | None,
+    period_col: str,
 ) -> list[np.ndarray]:
     """Order candidate plans by the joint simulation, feasible ones first.
 
@@ -787,11 +1017,14 @@ def _rank_by_joint_value(
         d = _plan_value(
             model,
             base_frame,
-            _assignments(opts, p),
+            _assignments(opts, p, only_promos=True),
             unit_cols=opts.unit_cols,
             unit_cost_col=unit_cost_col,
         )
-        feasible = _feasible_joint(d, p, opts, constraints)
+        tot = _draw_totals(d)
+        feasible = _totals_ok(tot, constraints) and _counts_ok(
+            p, opts, constraints, period_col
+        )
         scored.append((not feasible, -d.metric(objective).sum(axis=1).mean(), k))
     return [plans[k] for _, _, k in sorted(scored)]
 
@@ -809,17 +1042,22 @@ def optimize_promotions(
     n_alternatives: int = 4,
     hdi_prob: float = 0.9,
     max_refine_rounds: int = 3,
+    timing: bool = False,
 ) -> PromoPlan:
-    """Choose one option per unit to maximize the expected objective.
+    """Choose one option per unit (and, with ``timing``, per period) to
+    maximize the expected objective.
 
     Builds the unit x option table (:func:`promo_options`), solves the
     multiple-choice knapsack with the constraints as a MILP on expected values,
-    then, when the model couples units (within-group pressure or cross-price),
-    polishes the plan by coordinate ascent on the joint simulation. The next
-    ``n_alternatives`` best plans (MILP with the earlier plans excluded) are
-    compared with the best and the baseline on the same draws.
+    then, when units interact (within-group pressure, cross-price, or post-promo
+    lags across periods with timing), polishes the plan by coordinate ascent on
+    the joint simulation. The next ``n_alternatives`` best plans (MILP with the
+    earlier plans excluded) are compared with the best and the baseline on the
+    same draws.
     """
     constraints = constraints or PromoConstraints()
+    period_col = model.panel_columns.period_col
+    base_frame = base_frame.reset_index(drop=True)
     opts = promo_options(
         model,
         base_frame,
@@ -829,43 +1067,52 @@ def optimize_promotions(
         objective=objective,
         unit_cost_col=unit_cost_col,
         hdi_prob=hdi_prob,
+        timing=timing,
     )
     value = opts.draws[objective].mean(axis=0)
     allowed = _allowed(opts, constraints)
     plans: list[np.ndarray] = []
     for _ in range(1 + max(0, n_alternatives)):
-        choice = _solve_milp(value, opts, constraints, allowed, plans)
+        choice = _solve_milp(value, opts, constraints, allowed, plans, period_col)
         if choice is None:
             break
         plans.append(choice)
     if not plans:
         raise ValueError("No feasible plan under these constraints")
-    if _is_coupled(model):
+    coupled = opts.evaluator is not None
+    if coupled:
         refined = _refine_coupled(
-            model,
-            base_frame,
             opts,
             plans[0],
             allowed,
             constraints,
             objective,
-            unit_cost_col,
             max_refine_rounds,
+            period_col,
         )
         if not any((refined == p).all() for p in plans):
             plans.insert(0, refined)
 
     plans = _rank_by_joint_value(
-        model, base_frame, opts, plans, constraints, objective, unit_cost_col
+        model,
+        base_frame,
+        opts,
+        plans,
+        constraints,
+        objective,
+        unit_cost_col,
+        period_col,
     )
     scenarios = {
-        ("best" if k == 0 else f"alternative_{k}"): _assignments(opts, p)
+        ("best" if k == 0 else f"alternative_{k}"): _assignments(
+            opts, p, only_promos=True
+        )
         for k, p in enumerate(plans)
     }
     comparison = compare_scenarios(
         model,
         base_frame,
-        scenarios,
+        {k: v for k, v in scenarios.items()},
         unit_cols=opts.unit_cols,
         objective=objective,
         unit_cost_col=unit_cost_col,
@@ -886,25 +1133,23 @@ def optimize_promotions(
         unit_cols=opts.unit_cols,
         unit_cost_col=unit_cost_col,
     )
+    tot = _draw_totals(d)
     usage = {
-        "promo_cost": float(d.discount_cost.sum(axis=1).mean()),
+        "promo_cost": tot["discount_cost"],
         "budget": constraints.budget,
         "n_promos": int((picked > 0).sum()),
         "max_promos": constraints.max_promos,
-        "margin_rate": (
-            float(d.margin.sum(axis=1).mean() / d.revenue.sum(axis=1).mean())
-            if d.margin is not None
-            else None
-        ),
+        "margin_rate": tot["margin"] / tot["revenue"] if "margin" in tot else None,
         "min_margin_rate": constraints.min_margin_rate,
-        "refined_for_coupling": _is_coupled(model),
+        "refined_for_coupling": coupled,
+        "timing": timing,
     }
     return PromoPlan(
         plan=plan,
         comparison=comparison,
         options=table,
         usage=usage,
-        alternatives=list(scenarios.values())[1:],
+        alternatives=[_assignments(opts, p) for p in plans[1:]],
     )
 
 

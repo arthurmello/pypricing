@@ -203,3 +203,52 @@ def test_default_promo_type_is_most_common_not_alphabetical(fitted):
     opts = promo_options(model, plan_frame(model, 2), discounts=(0.1,))
     promo_rows = opts.table[opts.table["discount"] > 0]
     assert set(promo_rows["promo_type"]) == {common}
+
+
+def test_timing_plan_respects_gap_and_caps(fitted):
+    from pypricing.promo import PromoConstraints, optimize_promotions
+
+    model, _ = fitted
+    frame = plan_frame(model, 4)
+    c = PromoConstraints(max_promos_per_unit=2, min_gap=1, max_promos_per={"period": 2})
+    result = optimize_promotions(
+        model,
+        frame,
+        discounts=(0.1, 0.3),
+        objective="units",
+        constraints=c,
+        timing=True,
+        n_alternatives=1,
+    )
+    plan = result.plan
+    assert "period" in plan.columns
+    assert len(plan) == frame[frame["promo_window"]].shape[0]
+    on = plan[plan["discount"] > 0]
+    assert on.groupby("sku").size().max() <= 2
+    assert on.groupby("period").size().max() <= 2
+    periods = sorted(frame.loc[frame["promo_window"], "period"].unique())
+    rank = {p: i for i, p in enumerate(periods)}
+    for _, g in on.groupby("sku"):
+        r = sorted(rank[p] for p in g["period"])
+        assert all(b - a >= 2 for a, b in zip(r, r[1:]))
+    assert result.usage["timing"] is True
+
+
+def test_block_evaluation_matches_full_frame(fitted):
+    from pypricing.promo import evaluate, promo_options
+
+    model, _ = fitted
+    frame = plan_frame(model, 2)
+    opts = promo_options(model, frame, discounts=(0.2,), objective="units")
+    assert opts.evaluator is not None  # pressure model: block path
+    from pypricing.promo import default_promo_type
+
+    sku = opts.units.iloc[0]["sku"]
+    a = pd.DataFrame(
+        {"sku": [sku], "discount": [0.2], "promo_type": [default_promo_type(model)]}
+    )
+    full = evaluate(model, apply_promos(model, frame, a), unit_cost_col=None)
+    base = evaluate(model, frame, unit_cost_col=None)
+    inc_full = (full.quantity.sum(axis=1) - base.quantity.sum(axis=1)).mean()
+    row = opts.table[(opts.table["sku"] == sku) & (opts.table["discount"] == 0.2)]
+    np.testing.assert_allclose(row["incremental_units"].iloc[0], inc_full, rtol=1e-9)
