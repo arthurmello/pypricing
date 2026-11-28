@@ -1198,7 +1198,11 @@ def promo_backtest(
         fit_kwargs.setdefault("random_seed", random_seed)
     work.fit(train, **fit_kwargs)
 
-    pred = work.predict(df, hdi_prob=hdi_prob, random_seed=random_seed)
+    # Held-out weeks have no fitted week effect: use the same week a year earlier.
+    pe = "seasonal" if work.time_effects is not None else "neutral"
+    pred = work.predict(
+        df, hdi_prob=hdi_prob, random_seed=random_seed, period_effect=pe
+    )
     is_test = df.index.isin(test.index)
     pred = pred.loc[is_test]
     y = pred[cols.quantity_col].to_numpy(dtype=np.float64)
@@ -1260,10 +1264,12 @@ def promo_backtest(
         full_regular.loc[test_promo, cols.price_col] = regular_price[test_promo]
         if work.promo is not None and work.promo.type_col is not None:
             full_regular.loc[test_promo, work.promo.type_col] = NO_PROMO_TYPE
-        q_promo = work.expected_quantity_draws(df).reshape(-1, len(df))[:, test_promo]
-        q_reg = work.expected_quantity_draws(full_regular).reshape(-1, len(df))[
-            :, test_promo
-        ]
+        q_promo = work.expected_quantity_draws(df, period_effect=pe).reshape(
+            -1, len(df)
+        )[:, test_promo]
+        q_reg = work.expected_quantity_draws(full_regular, period_effect=pe).reshape(
+            -1, len(df)
+        )[:, test_promo]
         ratio = q_promo / q_reg
         keep = [
             c

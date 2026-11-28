@@ -1719,7 +1719,8 @@ class DemandModel:
     ) -> pd.DataFrame:
         """Predict quantity. ``period_effect`` applies only to periods that were
         not in the training sample: ``"neutral"`` (default) uses λ = 0,
-        ``"draw"`` draws λ ~ N(0, sigma_lambda) per posterior draw, and a
+        ``"draw"`` draws λ ~ N(0, sigma_lambda) per posterior draw,
+        ``"seasonal"`` reuses the training period a year earlier, and a
         training period label reuses that period's fitted λ.
         """
         ds = self.sample_posterior_predictive(
